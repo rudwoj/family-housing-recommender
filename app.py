@@ -74,7 +74,8 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
     if not api_key:
         return {"path": [], "status": "no_key", "reason": "카카오 키 없음"}
     if mode == "walk":
-        return {"path": [], "status": "walk", "reason": "도보 전용 길찾기 API 없음"}
+        return {"path": [], "status": "walk",
+                "reason": "카카오에 도보 전용 길찾기 API 가 없어 직선으로 표시합니다"}
     try:
         if mode == "drive":
             route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key)
@@ -475,7 +476,7 @@ def render_result(conf: dict) -> None:
             st.caption("ℹ️ `KAKAO_JAVASCRIPT_KEY` 를 설정하면 카카오맵으로 표시됩니다.")
 
         if routes:
-            badge = {"real": "✅ 실제 경로", "walk": "➖ 직선(도보)",
+            badge = {"real": "✅ 실제 경로", "walk": "➖ 직선(도보 API 없음)",
                      "no_route": "⚠️ 경로 없음", "error": "❌ 조회 실패",
                      "no_key": "➖ 키 없음"}
             rows = []
@@ -489,10 +490,22 @@ def render_result(conf: dict) -> None:
             status = pd.DataFrame(rows)
             with st.expander("경로 조회 상태 — 왜 어떤 선은 직선인가", expanded=True):
                 st.dataframe(status, use_container_width=True, hide_index=True)
-                if (status["경로"] == "❌ 조회 실패").any():
-                    st.warning("카카오 **대중교통 길찾기**는 디벨로퍼스 콘솔에서 "
-                               "[내 애플리케이션 > 제품 설정 > 카카오맵] 사용 설정이 필요합니다. "
-                               "자동차 길찾기(카카오모빌리티)와 권한이 다릅니다.")
+                failed = status[status["경로"] == "❌ 조회 실패"]
+                if not failed.empty:
+                    why = " ".join(failed["비고"].astype(str))
+                    if "OPEN_MAP_AND_LOCAL" in why:
+                        st.warning(
+                            "대중교통 경로가 `disabled OPEN_MAP_AND_LOCAL` 로 막혔습니다. "
+                            "지금 쓰는 **REST API 키의 앱**에서 "
+                            "[제품 설정 > 카카오맵] 사용 설정이 꺼져 있다는 뜻입니다. "
+                            "자동차 길찾기(카카오모빌리티)는 권한이 달라 이 설정과 무관하게 동작하므로, "
+                            "차만 되고 대중교통만 실패한다면 십중팔구 이 경우입니다. "
+                            "앱이 여러 개라면 배포본 Secrets 의 키가 다른 앱 것은 아닌지도 확인하세요.")
+                    else:
+                        st.warning(
+                            "대중교통 경로 조회에 실패했습니다. 디벨로퍼스 콘솔에서 "
+                            "[내 애플리케이션 > 제품 설정 > 카카오맵] 사용 설정을 확인하세요. "
+                            "자동차 길찾기(카카오모빌리티)와 권한이 다릅니다.")
 
         mrow = top.loc[map_sel]
         for m in active:
