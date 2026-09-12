@@ -1,0 +1,10 @@
+# --- 필수 ---
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+streamlit>=1.30
+plotly>=5.18
+
+# --- 선택 (미설치 시 Plotly 지도로 자동 대체) ---
+folium>=0.15
+streamlit-folium>=0.20
