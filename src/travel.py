@@ -79,6 +79,18 @@ class EstimatedTravelProvider(TravelProvider):
         return np.clip(np.round(minutes, 1), 1.0, 600.0)
 
 
+def _secret(name: str) -> str:
+    """환경변수 → .env → Streamlit Secrets 순으로 읽는다.
+
+    지도 경로는 load_settings() 를 거쳐 st.secrets 까지 보는데 여기만
+    os.getenv 를 봐서, 배포본(Secrets 로만 키를 넣은 경우)에서 지도 선은 실제
+    경로인데 이동시간만 조용히 추정치로 떨어졌었다. 같은 경로로 통일한다.
+    """
+    from .data_sources.config import _ensure_env_loaded, _read_secret
+    _ensure_env_loaded()
+    return _read_secret(name)
+
+
 class ApiTravelProvider(TravelProvider):
     """
     실제 경로 API 연동.
@@ -99,8 +111,8 @@ class ApiTravelProvider(TravelProvider):
     def __init__(self, fallback: TravelProvider | None = None, timeout: float = 6.0):
         self.fallback = fallback or EstimatedTravelProvider()
         self.timeout = timeout
-        self.kakao_key = os.getenv("KAKAO_REST_API_KEY")
-        self.odsay_key = os.getenv("ODSAY_API_KEY")
+        self.kakao_key = _secret("KAKAO_REST_API_KEY")
+        self.odsay_key = _secret("ODSAY_API_KEY")
         #: 모드별 마지막 실패 사유 — 화면에서 "왜 추정치인가" 를 보여주기 위함
         self.last_error: dict[str, str] = {}
 
