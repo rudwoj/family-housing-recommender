@@ -1,0 +1,44 @@
+{
+  "source": "국토교통부_아파트 전월세 실거래가 + 카카오 로컬 API",
+  "deal_ym": "202608",
+  "sigungu_codes": [
+    "11680",
+    "11710",
+    "11440",
+    "11200",
+    "11350",
+    "11470",
+    "11560",
+    "11380",
+    "11590",
+    "11215"
+  ],
+  "n_listings": 50,
+  "transit_walk_stats": {
+    "real": 50,
+    "estimated_fallback": 0,
+    "skipped_no_geocode": 0,
+    "skipped_bad_row": 0
+  },
+  "real_fields": [
+    "name",
+    "gu",
+    "lat",
+    "lon",
+    "area_m2",
+    "floor",
+    "built_year",
+    "transit_walk_min (실측 우선, 검색 실패시 추정)"
+  ],
+  "estimated_fields": [
+    "rooms",
+    "parking_slots",
+    "orientation",
+    "total_floors",
+    "green_ratio",
+    "complex_units",
+    "daylight_hours",
+    "noise_db"
+  ],
+  "note": "travel_times.csv 는 기본 데모 구성원 템플릿 스냅샷이며, 앱은 사용자가 입력한 목적지로 매 세션 실시간 계산한다(경로 API 사용 토글 시 src/travel.py ApiTravelProvider, 지도 실경로는 src/data_sources/kakao.py)."
+}

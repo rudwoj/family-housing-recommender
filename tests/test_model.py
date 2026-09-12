@@ -47,9 +47,15 @@ def test_price_and_distance_guard():
 
 
 def test_outlier_robustness():
-    """① 이상치가 있어도 일반 매물의 변별력이 유지되는가"""
-    listings, _, _ = load()
-    x = listings[["area_m2"]].dropna()
+    """① 이상치가 있어도 일반 매물의 변별력이 유지되는가.
+
+    data/listings.csv 는 실거래가 원본(이상치 주입 없음)일 수도, 목업(의도적 초대형
+    이상치 포함)일 수도 있어 스케일러 검증을 특정 데이터 소스에 의존시키지 않는다 —
+    이 테스트만을 위한 합성 이상치 분포를 직접 만든다."""
+    rng = np.random.default_rng(7)
+    normal_area = rng.normal(75, 20, 300).clip(29, 175)
+    outlier_area = rng.uniform(320, 640, 5)
+    x = pd.DataFrame({"area_m2": np.concatenate([normal_area, outlier_area])})
     feats = {"area_m2": FEATURE_BY_KEY["area_m2"]}
     normal = x["area_m2"] < 200
 
@@ -81,23 +87,26 @@ def test_nonlinear_utility():
 
 
 def test_backoff():
-    """③ 과도한 제약 → 0건 대신 단계적 완화로 후보 복원"""
+    """③ 과도한 제약 → 0건 대신 단계적 완화로 후보 복원
+
+    임계값은 실거래 데이터(적은 표본, 신축·대형 평형 희소)에서도 락 제약(rooms>=3)만은
+    통과하는 후보가 남고, 나머지 제약은 전부 거를 만큼 빡빡하게 잡는다."""
     listings, travel, members = load()
     eng = FamilyHousingRecommender(listings, travel, members)
 
     harsh = HardConstraints(numeric=[
-        Constraint("rooms", "min", 6, priority=0, locked=True, label="방 개수"),
-        Constraint("area_m2", "min", 160, priority=1, label="전용면적"),
-        Constraint("parking_slots", "min", 2.5, priority=2, label="주차"),
-        Constraint("building_age", "max", 3, priority=3, label="준공 경과년수"),
-        Constraint("transit_walk_min", "max", 3, priority=2, label="역까지 도보"),
+        Constraint("rooms", "min", 3, priority=0, locked=True, label="방 개수"),
+        Constraint("area_m2", "min", 70, priority=1, label="전용면적"),
+        Constraint("parking_slots", "min", 1.1, priority=2, label="주차"),
+        Constraint("building_age", "max", 15, priority=3, label="준공 경과년수"),
+        Constraint("transit_walk_min", "max", 6, priority=2, label="역까지 도보"),
     ], min_candidates=5)
 
     cand, _, relax, log = eng.filter_with_backoff(harsh)
     assert len(cand) >= 5, f"백오프 실패: {len(cand)}건"
     assert len(relax) > 0, "완화 기록이 없음"
     # 잠긴 제약은 절대 완화되지 않아야 한다
-    assert cand["rooms"].min() >= 6, "locked 제약이 완화됨"
+    assert cand["rooms"].min() >= 3, "locked 제약이 완화됨"
     print(f"✅ 백오프: 0건 → {len(cand)}건 복원 (완화 {len(relax)}단계, 방 개수 잠금 유지)")
     print(log.to_string(index=False))
 
