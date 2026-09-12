@@ -123,25 +123,26 @@ def kakao_map_html(top, members: list[Member], selected_id: str,
       void ov;
     }});
 
-    // 컴포넌트 iframe 은 처음에 크기가 0 이라, 그 상태로 setBounds 를 부르면
-    // 카카오가 레벨을 최대로 빼버린다(한반도 전체가 보인다). 크기가 잡힌 뒤
-    // relayout + setBounds 를 다시 부른다.
-    var fitted = false;
+    // 컴포넌트 iframe 은 처음에 크기가 0 이고, 비활성 탭 안에 있으면 탭을 열
+    // 때까지 계속 0 이다. 그 상태의 setBounds 는 레벨을 최대로 빼버리고,
+    // 아예 부르지 않으면 지도 중심이 좌상단에 박힌다. 그래서 시간 제한을 두지
+    // 않고 크기가 "바뀔 때마다" relayout + setBounds 를 다시 부른다.
+    var lastW = 0, lastH = 0;
     function fit() {{
       var el = document.getElementById('map');
-      if (!el.clientWidth || !el.clientHeight) return;
+      var w = el.clientWidth, h = el.clientHeight;
+      if (!w || !h || (w === lastW && h === lastH)) return;
+      lastW = w; lastH = h;
       map.relayout();
       if (!bounds.isEmpty()) map.setBounds(bounds);
-      fitted = true;
     }}
     fit();
-    if (!fitted) {{
-      var tries = 0;
-      var timer = setInterval(function () {{
-        fit();
-        if (fitted || ++tries > 40) clearInterval(timer);
-      }}, 150);
+    if (window.ResizeObserver) {{
+      new ResizeObserver(fit).observe(document.getElementById('map'));
+    }} else {{
+      setInterval(fit, 300);
     }}
+    window.addEventListener('resize', fit);
 
     var seen = {{}}, html = '';
     D.lines.forEach(function (ln) {{
