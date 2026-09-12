@@ -167,7 +167,8 @@ class CarRoute:
 
 
 def car_directions(origin_lat: float, origin_lon: float, dest_lat: float, dest_lon: float,
-                    api_key: str, priority: str = "RECOMMEND") -> CarRoute | None:
+                    api_key: str, priority: str = "RECOMMEND",
+                    timeout: int = DEFAULT_TIMEOUT) -> CarRoute | None:
     """
     카카오모빌리티 자동차 길찾기. 좌표는 "경도,위도" 순서로 보낸다.
     앱에 카카오모빌리티 상품이 활성화되어 있지 않으면 403/401 로 KakaoError 가 발생한다.
@@ -177,7 +178,7 @@ def car_directions(origin_lat: float, origin_lon: float, dest_lat: float, dest_l
         "destination": f"{dest_lon},{dest_lat}",
         "priority": priority,
     }
-    data = _get(CAR_DIRECTIONS_URL, api_key, params)
+    data = _get(CAR_DIRECTIONS_URL, api_key, params, timeout=timeout)
     routes = data.get("routes", [])
     if not routes:
         return None
@@ -200,7 +201,7 @@ class TransitRoute:
 
 
 def transit_route(origin_lat: float, origin_lon: float, dest_lat: float, dest_lon: float,
-                   api_key: str) -> TransitRoute | None:
+                   api_key: str, timeout: int = DEFAULT_TIMEOUT) -> TransitRoute | None:
     """
     카카오맵 대중교통 경로 조회. 디벨로퍼스 콘솔에서 [앱]>[제품 설정]>[카카오맵]
     사용 설정이 켜져 있어야 한다 (꺼져 있으면 KakaoError).
@@ -209,7 +210,7 @@ def transit_route(origin_lat: float, origin_lon: float, dest_lat: float, dest_lo
         "start_x": origin_lon, "start_y": origin_lat,
         "end_x": dest_lon, "end_y": dest_lat,
     }
-    data = _get(TRANSIT_ROUTE_URL, api_key, params)
+    data = _get(TRANSIT_ROUTE_URL, api_key, params, timeout=timeout)
     status = data.get("status")
     if status and status != "OK":
         return None
