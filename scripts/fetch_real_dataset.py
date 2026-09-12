@@ -25,6 +25,7 @@ import json
 import math
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -50,6 +51,14 @@ GU_NAMES = {
 CITY = "서울특별시"
 WALK_M_PER_MIN = 67.0  # 도보 평균 속도(분속) — mock 의 transit_walk_min 분포와 맞춘 근사치
 
+#: 카카오 지오코딩·지하철역 조회는 매물 1건당 2회씩 발생해 순차로 돌면 압도적 병목이다.
+#: 호출 간격(sleep) 대신 워커 수로 동시성을 제한한다.
+MAX_WORKERS = 12
+
+#: 시군구당 한 번에 받아오는 실거래 원시 행 수. 중복·불량 행을 걸러낸 뒤 cap 만큼만 쓰므로
+#: 넉넉히 받아야 cap 을 채울 수 있다(1000행 응답도 0.5초 수준).
+RAW_ROWS_PER_SIGUNGU = 1000
+
 
 def _walk_minutes_estimate(rng: np.random.Generator, n: int) -> np.ndarray:
     """지하철 검색이 실패했을 때만 쓰는 최후 폴백 (mock과 동일 분포)."""
@@ -72,10 +81,19 @@ def fetch_raw_rent_rows(settings, stats: Stats) -> list[dict]:
     seen = set()
     cap = settings.max_complexes_per_sigungu or 20
 
-    for code in settings.target_sigungu_codes:
+    def fetch_one(code: str):
+        return public_data.fetch_apt_rent(code, settings.target_deal_ym,
+                                          settings.data_go_kr_service_key,
+                                          endpoint=settings.apt_rent_endpoint,
+                                          num_of_rows=RAW_ROWS_PER_SIGUNGU)
+
+    codes = list(settings.target_sigungu_codes)
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(len(codes), 1))) as pool:
+        responses = list(pool.map(fetch_one, codes))
+
+    # 시군구 순서대로 훑어야 listing_id 부여가 재현 가능하다.
+    for code, resp in zip(codes, responses):
         gu = GU_NAMES.get(code, code)
-        resp = public_data.fetch_apt_rent(code, settings.target_deal_ym, settings.data_go_kr_service_key,
-                                           endpoint=settings.apt_rent_endpoint, num_of_rows=100)
         if not resp.ok:
             print(f"⚠️  [{gu}] 실거래 조회 실패: {resp.error}")
             continue
@@ -116,38 +134,35 @@ def fetch_raw_rent_rows(settings, stats: Stats) -> list[dict]:
             taken += 1
 
         print(f"✅ [{gu}] {taken}건 수집 (전체 {len(resp.items)}건 중, 중복/불량 제외)")
-        kakao.sleep_between_calls(settings.request_interval_sec)
 
     return raw_rows
 
 
 def geocode_rows(raw_rows: list[dict], settings, stats: Stats) -> list[dict]:
     """주소 -> 좌표. 도로명주소 실패 시 지번주소로 재시도, 캐시로 중복 호출을 줄인다."""
-    cache: dict[str, kakao.GeocodeResult | None] = {}
+    addresses = {addr for row in raw_rows
+                 for addr in (row["road_address"], row["jibun_address"]) if addr}
+
+    def resolve(addr: str):
+        # 네트워크 일시 오류(DNS/타임아웃)까지 삼켜야 한다 — 수백 건을 병렬로 던지면
+        # 한두 건은 실패하는데, 여기서 새면 갱신 전체가 죽는다.
+        try:
+            return kakao.geocode_address(addr, settings.kakao_rest_api_key)
+        except Exception as e:                          # noqa: BLE001
+            print(f"   지오코딩 오류 ({addr}): {str(e)[:100]}")
+            return None
+
+    ordered = sorted(addresses)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        cache = dict(zip(ordered, pool.map(resolve, ordered)))
+
     geocoded = []
-
     for row in raw_rows:
-        result = None
-        for addr in (row["road_address"], row["jibun_address"]):
-            if not addr:
-                continue
-            if addr in cache:
-                result = cache[addr]
-            else:
-                try:
-                    result = kakao.geocode_address(addr, settings.kakao_rest_api_key)
-                except kakao.KakaoError as e:
-                    print(f"   지오코딩 오류 ({addr}): {e}")
-                    result = None
-                cache[addr] = result
-                kakao.sleep_between_calls(settings.request_interval_sec)
-            if result is not None:
-                break
-
+        result = next((cache.get(addr) for addr in (row["road_address"], row["jibun_address"])
+                       if addr and cache.get(addr) is not None), None)
         if result is None:
             stats.skipped_no_geocode += 1
             continue
-
         geocoded.append({**row, "lat": result.lat, "lon": result.lon})
 
     return geocoded
@@ -156,16 +171,21 @@ def fetch_transit_walk_minutes(geocoded: list[dict], settings, rng: np.random.Ge
                                stats: Stats) -> list[float]:
     """카카오 로컬 API로 가장 가까운 지하철역까지의 거리를 조회해 도보 시간(분)으로 환산한다.
     검색 실패시에만 mock과 동일한 분포로 추정치를 채운다."""
-    out = []
-    for row in geocoded:
+    def nearest(row: dict):
+        # 실패하면 아래에서 추정치로 메운다. 네트워크 오류까지 잡아야 갱신이 안 죽는다.
         try:
-            place = kakao.search_category_nearest(row["lat"], row["lon"],
-                                                   kakao.CATEGORY_CODES["subway"],
-                                                   settings.kakao_rest_api_key)
-        except kakao.KakaoError:
-            place = None
-        kakao.sleep_between_calls(settings.request_interval_sec)
+            return kakao.search_category_nearest(row["lat"], row["lon"],
+                                                 kakao.CATEGORY_CODES["subway"],
+                                                 settings.kakao_rest_api_key)
+        except Exception:                               # noqa: BLE001
+            return None
 
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        places = list(pool.map(nearest, geocoded))
+
+    # rng 는 순서대로 뽑아야 시드가 같을 때 결과가 재현된다 — 폴백 채우기는 순차로.
+    out = []
+    for place in places:
         if place is not None and place.distance_m is not None:
             out.append(round(np.clip(place.distance_m / WALK_M_PER_MIN, 1, 60), 1))
             stats.real += 1
