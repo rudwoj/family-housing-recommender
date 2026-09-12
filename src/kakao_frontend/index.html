@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kakao map</title>
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; }
+</style>
+</head>
+<body>
+<!--
+  카카오맵을 "진짜 URL" 문서 안에서 띄우기 위한 얇은 셸.
+
+  st.components.v1.html 은 HTML 을 about:srcdoc 문서에 넣는데, 카카오 SDK 는
+      var s = "https:" == location.protocol ? "https:" : "http:"
+  로 2단계 스크립트(t1.daumcdn.net/mapjsapi/...) 주소를 만든다. srcdoc 문서의
+  location.protocol 은 "about:" 이라 항상 http 가 골라지고, HTTPS 페이지에서는
+  mixed content 로 차단되어 kakao.maps.load() 가 영원히 콜백하지 않는다.
+
+  커스텀 컴포넌트는 /component/<name>/index.html 이라는 실제 URL 로 서빙되므로
+  location.protocol 이 https: 가 되고, Referer 도 등록된 도메인으로 나간다.
+  파이썬이 만들어 준 지도 HTML 을 args 로 받아 이 문서 안에 주입한다.
+-->
+<div id="root"></div>
+<script>
+(function () {
+  function post(msg) {
+    window.parent.postMessage(Object.assign({isStreamlitMessage: true}, msg), "*");
+  }
+  function setHeight(h) {
+    post({type: "streamlit:setFrameHeight", height: h});
+  }
+
+  // innerHTML 로 넣은 <script> 는 실행되지 않으므로, 스크립트만 떼어내
+  // 순서대로 다시 만들어 붙인다. src 스크립트는 로드를 기다린다.
+  function inject(html, done) {
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    var scripts = [].slice.call(doc.querySelectorAll("script"));
+    scripts.forEach(function (s) { s.parentNode.removeChild(s); });
+
+    var root = document.getElementById("root");
+    root.innerHTML = doc.body.innerHTML;
+
+    (function next(i) {
+      if (i >= scripts.length) { done && done(); return; }
+      var old = scripts[i];
+      var s = document.createElement("script");
+      if (old.src) {
+        s.src = old.src;
+        s.onload = function () { next(i + 1); };
+        s.onerror = function () {
+          var handler = old.getAttribute("onerror");
+          if (handler) { try { new Function(handler).call(s); } catch (e) {} }
+          next(i + 1);
+        };
+        document.body.appendChild(s);
+      } else {
+        s.textContent = old.textContent;
+        document.body.appendChild(s);
+        next(i + 1);
+      }
+    })(0);
+  }
+
+  var lastHtml = null;
+
+  window.addEventListener("message", function (event) {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    var args = event.data.args || {};
+    var html = args.html || "";
+    var height = args.height || 560;
+
+    if (html === lastHtml) { setHeight(height); return; }
+    lastHtml = html;
+    inject(html, function () { setHeight(height); });
+    setHeight(height);
+  });
+
+  post({type: "streamlit:componentReady", apiVersion: 1});
+  setHeight(560);
+})();
+</script>
+</body>
+</html>
+
