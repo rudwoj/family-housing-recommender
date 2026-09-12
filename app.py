@@ -21,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from src import viz, viz_kakao
-from src.data_sources import kakao
+from src.data_sources import kakao, odsay, tmap
 from src.data_sources.config import load_settings
 from src.features import derive_common_features
 from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
@@ -29,7 +29,8 @@ from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
 from src.schema import (COMMON_FEATURES, DEFAULT_MEMBER_COUNT, MAX_MEMBERS,
                         ORIENTATION_SCORE, TRAVEL_MODES, Destination, Member,
                         make_default_members)
-from src.travel import ApiTravelProvider, EstimatedTravelProvider, travel_matrix
+from src.travel import (ApiTravelProvider, EstimatedTravelProvider, travel_matrix,
+                        _secret as read_api_key)
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
@@ -60,31 +61,60 @@ def load_listings() -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
-                     mode: str, api_key: str) -> dict:
+                     mode: str, api_key: str, odsay_key: str = "",
+                     tmap_key: str = "") -> dict:
     """
     카카오 API로 실제 이동 경로 좌표를 가져온다.
 
     반환: {"path": [...], "status": ..., "reason": ...}
       real      실제 경로를 받았다
-      walk      도보는 카카오에 전용 길찾기 API가 없어 항상 직선이다
+      walk      도보 경로를 못 받아 직선으로 그린다 (TMap 키 없음/거부/실패)
       no_route  API는 응답했지만 경로가 없다
       error     호출 실패 (권한/설정 문제일 가능성이 높다)
     왜 직선으로 나오는지 화면에서 확인할 수 있도록 이유를 삼키지 않고 돌려준다.
     """
+    if not api_key and not odsay_key and not tmap_key:
+        return {"path": [], "status": "no_key", "reason": "경로 API 키 없음"}
+
+    if mode == "walk":
+        # 도보는 카카오·ODsay 모두 길찾기가 없어 TMap 으로만 실측할 수 있다.
+        if not tmap_key:
+            return {"path": [], "status": "walk",
+                    "reason": "TMAP_APP_KEY 가 없어 직선으로 표시합니다"}
+        try:
+            route = tmap.pedestrian_route(lat, lon, dest_lat, dest_lon, tmap_key)
+            if route is not None and len(route.path) >= 2:
+                return {"path": route.path, "status": "real", "reason": "TMap",
+                        "minutes": route.total_time_sec / 60.0}
+            return {"path": [], "status": "walk", "reason": "TMap 경로 결과 없음 — 직선 표시"}
+        except Exception as e:                      # noqa: BLE001
+            # 출발-도착이 너무 멀면 TMap 이 경로를 거부한다. 타임아웃 같은 네트워크
+            # 오류까지 함께 잡아야 한다 — 여기서 새면 앱 전체가 죽는다.
+            return {"path": [], "status": "walk", "reason": f"TMap: {str(e)[:120]}"}
+    if mode == "transit" and odsay_key:
+        # 대중교통은 ODsay 를 먼저 쓴다 (카카오 대중교통은 응답이 커서 느리다).
+        try:
+            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key)
+            if route is not None and len(route.path) >= 2:
+                return {"path": route.path, "status": "real", "reason": "ODsay",
+                        "minutes": route.total_time_sec / 60.0}
+        except Exception as e:                      # noqa: BLE001 - 타임아웃 포함
+            if not api_key:
+                return {"path": [], "status": "error", "reason": f"ODsay: {str(e)[:140]}"}
+
     if not api_key:
         return {"path": [], "status": "no_key", "reason": "카카오 키 없음"}
-    if mode == "walk":
-        return {"path": [], "status": "walk",
-                "reason": "카카오에 도보 전용 길찾기 API 가 없어 직선으로 표시합니다"}
     try:
         if mode == "drive":
             route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key)
         else:
             route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key)
         if route is not None and len(route.path) >= 2:
-            return {"path": route.path, "status": "real", "reason": ""}
+            secs = getattr(route, "duration_sec", None) or getattr(route, "total_time_sec", None)
+            return {"path": route.path, "status": "real", "reason": "",
+                    "minutes": (secs / 60.0) if secs else None}
         return {"path": [], "status": "no_route", "reason": "경로 결과 없음"}
-    except kakao.KakaoError as e:
+    except Exception as e:                          # noqa: BLE001 - 타임아웃 포함
         return {"path": [], "status": "error", "reason": str(e)[:160]}
 
 
@@ -450,14 +480,20 @@ def render_result(conf: dict) -> None:
 
         routes: dict[tuple[str, str], dict] = {}
         settings = load_settings()
-        if conf["use_api"] and settings.has_kakao_key:
-            with st.spinner("카카오 API로 실제 동선 조회 중..."):
+        odsay_key = read_api_key("ODSAY_API_KEY")
+        tmap_key = read_api_key("TMAP_APP_KEY")
+        # 지도 동선은 "선택한 매물 1건" 에 대해서만 조회하므로 호출이 몇 건뿐이다.
+        # 전체 매물 × 목적지를 도는 이동시간 계산(경로 API 토글)과 달리 항상
+        # 실제 경로를 가져온다 — 토글이 꺼져 있다고 대중교통까지 직선으로 그리면
+        # 지나는 역을 하나도 안 보여주게 된다.
+        if settings.has_kakao_key or odsay_key or tmap_key:
+            with st.spinner("실제 동선 조회 중..."):
                 for m in active:
                     for dst in m.enabled_destinations:
                         routes[(m.key, dst.key)] = fetch_real_route(
                             float(r_sel["lat"]), float(r_sel["lon"]),
                             float(dst.lat), float(dst.lon), dst.mode,
-                            settings.kakao_rest_api_key)
+                            settings.kakao_rest_api_key, odsay_key, tmap_key)
 
         if settings.has_kakao_js_key:
             # components.html(=about:srcdoc) 이 아니라 커스텀 컴포넌트로 띄운다.
