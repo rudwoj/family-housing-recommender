@@ -1,11 +1,10 @@
 """
 가족 맞춤 주거지 추천 (Multi-Person Weighted K-NN)
 
-실행:
-    streamlit run app.py
+실행: streamlit run app.py
 
-가격 정보를 전혀 사용하지 않고, 주택의 공간·환경 조건(공통 데이터)과
-구성원 각자의 생활 동선(개별 데이터)만으로 최적 주거지를 추천한다.
+가격을 배제하고, 주택의 공간 조건(공통)과 구성원이 입력한 목적지까지의
+이동 시간(개별)만으로 추천한다. 모든 이동 지표는 분 단위 시간이다.
 """
 
 from __future__ import annotations
@@ -18,8 +17,11 @@ import streamlit as st
 
 from src import viz
 from src.features import derive_common_features
-from src.model import FamilyHousingRecommender, HardConstraints, WeightConfig, label_of
-from src.schema import COMMON_FEATURES, FEATURE_BY_KEY, Member, ORIENTATION_SCORE
+from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
+                       HardConstraints, WeightConfig, label_of)
+from src.schema import (AUX_COLUMNS, COMMON_FEATURES, ORIENTATION_SCORE, TRAVEL_MODES,
+                        Destination, Member)
+from src.travel import ApiTravelProvider, EstimatedTravelProvider, travel_matrix
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
@@ -32,267 +34,350 @@ try:
 except Exception:
     HAS_ST_FOLIUM = False
 
+# 목적지 좌표 입력을 돕는 프리셋 (직접 입력도 가능)
+PLACE_PRESETS = {
+    "여의도": (37.5216, 126.9243), "강남역": (37.4979, 127.0276),
+    "광화문": (37.5720, 126.9769), "판교": (37.3947, 127.1112),
+    "구로디지털단지": (37.4853, 126.9015), "성수": (37.5446, 127.0559),
+    "대치 학원가": (37.4995, 127.0630), "잠실": (37.5133, 127.1000),
+    "상암DMC": (37.5796, 126.8896), "용산": (37.5298, 126.9648),
+}
 
-# --------------------------------------------------------------------------- #
-# 데이터 로딩
-# --------------------------------------------------------------------------- #
+
 @st.cache_data(show_spinner=False)
-def load_data():
-    listings = derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
-    individual = pd.read_csv(os.path.join(DATA, "individual_features.csv"))
+def load_listings() -> pd.DataFrame:
+    return derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
+
+
+@st.cache_data(show_spinner=False)
+def load_member_config() -> list[dict]:
     with open(os.path.join(DATA, "members.json"), encoding="utf-8") as f:
-        members = [Member.from_dict(d) for d in json.load(f)]
-    return listings, individual, members
+        return json.load(f)
+
+
+@st.cache_data(show_spinner="이동 시간 계산 중...")
+def compute_travel(signature: tuple, use_api: bool) -> pd.DataFrame:
+    """목적지 구성이 바뀔 때만 이동 시간을 다시 계산한다."""
+    listings = load_listings()
+    members = [Member(key=mk, name=mk, color="#000",
+                      destinations=[Destination(key=dk, label=dk, lat=la, lon=lo, mode=mo)])
+               for mk, dk, la, lo, mo in signature]
+    provider = ApiTravelProvider() if use_api else EstimatedTravelProvider()
+    frames = [travel_matrix(listings, [m], provider) for m in members]
+    out = frames[0]
+    for f in frames[1:]:
+        out = out.merge(f, on="listing_id")
+    return out
 
 
 if not os.path.exists(os.path.join(DATA, "listings.csv")):
     st.error("데이터가 없습니다. 먼저 실행하세요:  `python data/generate_mock_data.py`")
     st.stop()
 
-listings, individual, members = load_data()
-
-PRESETS = {
-    "⚖️ 균형": dict(alpha=0.5, prio={"dad": 1.0, "mom": 1.0, "child": 1.0}),
-    "👶 자녀 중심": dict(alpha=0.35, prio={"dad": 0.6, "mom": 0.8, "child": 2.2}),
-    "🚇 통근 우선": dict(alpha=0.25, prio={"dad": 1.6, "mom": 1.6, "child": 0.6}),
-    "🏠 집 자체 우선": dict(alpha=0.85, prio={"dad": 1.0, "mom": 1.0, "child": 1.0}),
-}
-
-
-# 프리셋은 위젯 키가 아니라 별도 상태에 보관하고, 위젯에는 value= 로 주입한다.
-# (위젯 키에 session_state 를 미리 써두는 방식은 세션 재연결 시 프론트엔드가 보낸
-#  위젯 값에 덮어써져 기본값이 무너진다 — 체크박스가 False 로 떨어지는 문제.)
-if "preset" not in st.session_state:
-    st.session_state.preset = {"alpha": 0.5, "prio": {m.key: float(m.priority) for m in members}}
-    st.session_state.preset_id = 0
-
-
-def apply_preset(pval: dict) -> None:
-    st.session_state.preset = {"alpha": pval["alpha"], "prio": dict(pval["prio"])}
-    st.session_state.preset_id += 1
-    st.rerun()
-
-
-PRESET = st.session_state.preset
-PID = st.session_state.preset_id
+listings = load_listings()
+member_cfg = load_member_config()
 
 # --------------------------------------------------------------------------- #
-# 사이드바
+# 사이드바 ① 구성원 · 목적지
 # --------------------------------------------------------------------------- #
 sb = st.sidebar
 sb.title("🏡 가족 주거 조건")
-sb.caption("가격은 일절 반영하지 않습니다. 공간·환경·동선만으로 계산합니다.")
+sb.caption("가격은 반영하지 않습니다. 공간 조건과 이동 시간(분)만으로 계산합니다.")
 
-sb.markdown("**빠른 프리셋**")
-pcols = sb.columns(2)
-for i, (pname, pval) in enumerate(PRESETS.items()):
-    if pcols[i % 2].button(pname, use_container_width=True):
-        apply_preset(pval)
+use_api = sb.toggle("경로 API 사용", value=False,
+                    help="KAKAO_REST_API_KEY / ODSAY_API_KEY 환경변수가 있을 때만 동작하며, "
+                         "실패 시 거리 기반 추정으로 자동 폴백합니다.")
+if use_api and not ApiTravelProvider().available:
+    sb.warning("API 키가 없어 거리 기반 추정으로 동작합니다.")
 
+sb.subheader("① 구성원과 목적지")
+members: list[Member] = []
+for cfg in member_cfg:
+    with sb.expander(f"{cfg['name']}", expanded=(cfg["key"] == "child")):
+        active = st.checkbox("추천에 반영", value=True, key=f"active__{cfg['key']}")
+        priority = st.slider("가족 내 발언권 $P_i$", 0.0, 3.0, value=1.0, step=0.1,
+                             key=f"prio__{cfg['key']}")
+        floor = st.slider("만족도 하한선 (이 밑이면 후보에서 제외)", 0, 90, value=0, step=5,
+                          key=f"floor__{cfg['key']}",
+                          help="상충하는 선호가 '어중간한 타협안'으로 수렴하는 것을 막습니다.")
+        dests: list[Destination] = []
+        for d in cfg["destinations"]:
+            st.markdown(f"**{d['label']}**")
+            c1, c2 = st.columns([1, 1])
+            enabled = c1.checkbox("사용", value=d.get("enabled", True),
+                                  key=f"den__{cfg['key']}__{d['key']}")
+            mode = c2.selectbox("이동수단", list(TRAVEL_MODES),
+                                index=list(TRAVEL_MODES).index(d.get("mode", "transit")),
+                                format_func=lambda k: TRAVEL_MODES[k],
+                                key=f"dmode__{cfg['key']}__{d['key']}")
+            place_names = ["(직접 입력)"] + list(PLACE_PRESETS)
+            preset = st.selectbox("위치", place_names, index=0,
+                                  key=f"dplace__{cfg['key']}__{d['key']}")
+            if preset == "(직접 입력)":
+                c3, c4 = st.columns(2)
+                lat = c3.number_input("위도", value=float(d["lat"]), format="%.4f",
+                                      key=f"dlat__{cfg['key']}__{d['key']}")
+                lon = c4.number_input("경도", value=float(d["lon"]), format="%.4f",
+                                      key=f"dlon__{cfg['key']}__{d['key']}")
+            else:
+                lat, lon = PLACE_PRESETS[preset]
+                st.caption(f"{preset} ({lat:.4f}, {lon:.4f})")
+            weight = st.slider("중요도", 0.0, 2.0, value=float(d.get("weight", 1.0)), step=0.1,
+                               key=f"dw__{cfg['key']}__{d['key']}")
+            cap = st.number_input("⛔ 이동시간 상한 (분, 0=제한 없음)", min_value=0, value=0, step=5,
+                                  key=f"dcap__{cfg['key']}__{d['key']}")
+            dests.append(Destination(d["key"], d["label"], lat, lon, mode, weight, enabled))
+            st.session_state[f"cap__{cfg['key']}__{d['key']}"] = cap
+            st.divider()
+        m = Member(cfg["key"], cfg["name"], cfg["color"], dests, priority, float(floor))
+        m.active = active
+        members.append(m)
+
+signature = tuple(sorted((m.key, d.key, round(d.lat, 5), round(d.lon, 5), d.mode)
+                         for m in members for d in m.enabled_destinations))
+if not signature:
+    st.error("활성화된 목적지가 없습니다. 구성원의 목적지를 하나 이상 켜주세요.")
+    st.stop()
+travel = compute_travel(signature, use_api)
+
+# --------------------------------------------------------------------------- #
+# 사이드바 ② 하드 제약 (백오프)
+# --------------------------------------------------------------------------- #
 sb.divider()
+sb.subheader("② 하드 제약")
+min_candidates = sb.slider("최소 확보 후보 수", 1, 30, 5, key="min_candidates",
+                           help="이보다 적으면 덜 중요한 제약부터 자동 완화(백오프)합니다.")
 
-# --- ① 하드 제약 --- #
-sb.subheader("① 하드 제약 (타협 불가)")
-hc_min, hc_max = {}, {}
-hc_min["rooms"] = sb.slider("최소 방 개수", 1, 5, 3)
-hc_min["area_m2"] = sb.slider("최소 전용면적 (m²)", 29, 150, 60, step=1)
-hc_max["building_age"] = sb.slider("최대 준공 경과년수 (년)", 0, 46, 30)
-hc_min["parking_per_unit"] = sb.slider("최소 세대당 주차대수", 0.0, 2.5, 0.5, step=0.05)
-allowed_or = sb.multiselect("허용 향", list(ORIENTATION_SCORE), default=list(ORIENTATION_SCORE))
-allowed_gu = sb.multiselect("지역 한정 (미선택 = 전체)", sorted(listings["gu"].unique()), default=[])
+constraints: list[Constraint] = []
+c_rooms = sb.slider("최소 방 개수", 1, 7, 3, key="c_rooms")
+lock_rooms = sb.checkbox("🔒 방 개수 절대 사수", value=True)
+constraints.append(Constraint("rooms", "min", c_rooms, priority=0,
+                              locked=lock_rooms, label="방 개수"))
 
-# --- ② 공통 vs 개별 균형 --- #
-sb.divider()
-sb.subheader("② 무엇을 더 중요하게?")
-alpha = sb.slider("🏠 집 자체 ←→ 🚶 생활 동선", 0.0, 1.0,
-                  value=float(PRESET["alpha"]), key=f"alpha__{PID}", step=0.05,
-                  help="1.0 에 가까울수록 주택의 물리·환경 조건, 0.0 에 가까울수록 구성원 동선을 우선합니다.")
-sb.caption(f"공통 피처 비중 **{alpha:.0%}** · 개별 동선 비중 **{1 - alpha:.0%}**")
+c_area = sb.slider("최소 전용면적 (m²)", 29, 200, 60, key="c_area")
+lock_area = sb.checkbox("🔒 면적 절대 사수", value=False)
+constraints.append(Constraint("area_m2", "min", c_area, priority=1,
+                              locked=lock_area, label="전용면적"))
 
-# --- ③ 구성원별 설정 --- #
-sb.divider()
-sb.subheader("③ 구성원별 가중치")
-member_priority, member_weights, member_max, satisficing = {}, {}, {}, {}
-use_satisficing = sb.toggle("만족 임계값 사용", value=True,
-                            help="'이 정도면 충분' 기준을 넘어서는 초과 성능은 점수 차이로 보지 않습니다.")
+c_park = sb.slider("최소 주차 가능 대수", 0.0, 3.0, 0.5, step=0.05, key="c_park")
+constraints.append(Constraint("parking_slots", "min", c_park, priority=2, label="주차 가능 대수"))
+
+c_walk = sb.slider("역까지 도보 시간 상한 (분)", 1, 45, 20, key="c_walk")
+constraints.append(Constraint("transit_walk_min", "max", c_walk, priority=2, label="역까지 도보"))
+
+with sb.expander("부가 조건 (가장 먼저 완화됨)", expanded=False):
+    c_age = st.slider("최대 준공 경과년수 (년)", 0, 46, 30)
+    constraints.append(Constraint("building_age", "max", c_age, priority=3, label="준공 경과년수"))
+    c_noise = st.slider("최대 주간 소음도 (dB)", 33, 74, 74)
+    if c_noise < 74:
+        constraints.append(Constraint("noise_db", "max", c_noise, priority=3, label="소음도"))
 
 for m in members:
-    with sb.expander(f"{m.name} · {m.anchor_label}", expanded=(m.key == "child")):
-        m.active = st.checkbox("추천에 반영", value=True, key=f"active__{m.key}")
-        member_priority[m.key] = st.slider(
-            "가족 내 발언권 $P_i$", 0.0, 3.0,
-            value=float(PRESET["prio"].get(m.key, m.priority)),
-            key=f"prio__{m.key}__{PID}", step=0.1)
-        w = {}
-        for f in m.features:
-            w[f.key] = st.slider(f"{f.label} ({f.unit})", 0.0, 2.0,
-                                 value=float(f.default_weight),
-                                 key=f"w__{m.key}__{f.key}", step=0.1)
-            if f.hard_filter == "max":
-                lo, hi = float(individual[m.column(f.key)].min()), float(individual[m.column(f.key)].max())
-                v = st.number_input(f"⛔ {f.label} 상한", value=float(round(hi)), min_value=lo,
-                                    max_value=float(round(hi)), step=(1.0 if f.unit == "분" else 50.0),
-                                    key=f"hard__{m.key}__{f.key}")
-                if v < hi:
-                    member_max[m.column(f.key)] = v
-            if use_satisficing and f.minute_factor is not None and f.unit == "분":
-                s = st.number_input(f"✅ {f.label} 충분 기준", value=25.0, min_value=0.0,
-                                    step=5.0, key=f"sat__{m.key}__{f.key}")
-                satisficing[m.column(f.key)] = s
-        member_weights[m.key] = w
+    for d in m.enabled_destinations:
+        cap = st.session_state.get(f"cap__{m.key}__{d.key}", 0)
+        if cap and cap > 0:
+            constraints.append(Constraint(d.column(m.key), "max", float(cap), priority=1,
+                                          label=f"{m.name}·{d.label}"))
 
-# --- ④ 공통 피처 가중치 --- #
+allowed_or = sb.multiselect("허용 향", list(ORIENTATION_SCORE), default=list(ORIENTATION_SCORE))
+allowed_gu = sb.multiselect("지역 한정 (미선택 = 전체)", sorted(listings["gu"].unique()), default=[])
+categories = []
+if len(allowed_or) < len(ORIENTATION_SCORE):
+    categories.append(CategoryConstraint("orientation", allowed_or, priority=2, label="향"))
+if allowed_gu:
+    categories.append(CategoryConstraint("gu", allowed_gu, priority=1, label="지역"))
+
+# --------------------------------------------------------------------------- #
+# 사이드바 ③ 가중치 · 전처리
+# --------------------------------------------------------------------------- #
 sb.divider()
-sb.subheader("④ 공통(주거) 피처 가중치")
+sb.subheader("③ 가중치")
+alpha = sb.slider("🏠 집 자체 ←→ 🚶 이동 시간", 0.0, 1.0, value=0.5, step=0.05, key="alpha")
+sb.caption(f"공통 {alpha:.0%} · 개별 동선 {1 - alpha:.0%}")
+
 common_weights = {}
-with sb.expander("공통 피처 상세 조정", expanded=False):
+with sb.expander("공통 피처 가중치", expanded=False):
     for f in COMMON_FEATURES:
         common_weights[f.key] = st.slider(f"{f.label} ({f.unit})", 0.0, 2.0,
-                                          value=float(f.default_weight),
-                                          key=f"wc__{f.key}", step=0.1)
+                                          value=float(f.default_weight), step=0.1,
+                                          key=f"wc__{f.key}")
+
+use_satisficing = sb.toggle("만족 임계값 사용", value=True,
+                            help="'이 정도면 충분' 기준보다 빠르면 모두 만점 처리합니다.")
+satisficing = {}
+if use_satisficing:
+    with sb.expander("충분 기준 (분)", expanded=False):
+        for m in members:
+            for d in m.enabled_destinations:
+                v = st.number_input(f"{m.name}·{d.label}", min_value=0, value=25, step=5,
+                                    key=f"sat__{m.key}__{d.key}")
+                satisficing[d.column(m.key)] = float(v)
 
 sb.divider()
-k = sb.slider("추천 매물 수 (K)", 3, 30, 10)
-n_clusters = sb.slider("군집 수", 2, 5, 3)
-scaler_kind = sb.radio("스케일링", ["minmax", "standard"], horizontal=True)
+sb.subheader("④ 전처리 · 출력")
+scaler_kind = sb.selectbox("스케일러", ["robust", "minmax", "standard"], index=0,
+                           format_func=lambda k: {"robust": "RobustScaler (이상치에 강함, 권장)",
+                                                  "minmax": "MinMax", "standard": "Standard"}[k],
+                           key="scaler_kind")
+clip_q = sb.slider("이상치 클리핑 (상·하위 %)", 0.0, 5.0, 1.0, step=0.5, key="clip_q") / 100
+k = sb.slider("추천 매물 수 (K)", 3, 30, 10, key="k")
+member_top_n = sb.slider("구성원별 개인 Top-N (교집합용)", 1, 15, 5, key="member_top_n")
+n_clusters = sb.slider("군집 수", 2, 5, 3, key="n_clusters")
 sort_mode = sb.radio("정렬 기준", ["종합 적합도", "최약자 우선 (Maximin)", "형평성 우선"], index=0,
-                     help="구성원 간 이해충돌을 다루는 세 가지 사회적 선택 규칙입니다.")
+                     key="sort_mode")
 
 # --------------------------------------------------------------------------- #
 # 추천 실행
 # --------------------------------------------------------------------------- #
-engine = FamilyHousingRecommender(listings, individual, members, scaler=scaler_kind)
-hc = HardConstraints(
-    common_min=hc_min, common_max=hc_max,
-    allowed_orientations=allowed_or if len(allowed_or) < len(ORIENTATION_SCORE) else None,
-    allowed_gu=allowed_gu or None, member_max=member_max)
-cfg = WeightConfig(alpha=alpha, common_weights=common_weights, member_priority=member_priority,
-                   member_weights=member_weights, satisficing=satisficing if use_satisficing else {})
+dest_weights = {d.column(m.key): d.weight for m in members for d in m.enabled_destinations}
+cfg = WeightConfig(alpha=alpha, common_weights=common_weights,
+                   member_priority={m.key: m.priority for m in members},
+                   dest_weights=dest_weights,
+                   satisficing=satisficing if use_satisficing else {})
+hc = HardConstraints(numeric=constraints, category=categories, min_candidates=min_candidates)
 
-active = [m for m in members if m.active]
-if not active and alpha < 1.0:
-    st.warning("활성 구성원이 없어 공통(주거) 피처만으로 계산합니다.")
+engine = FamilyHousingRecommender(listings, travel, members,
+                                  scaler=scaler_kind, clip_q=clip_q)
+if not engine.active_members and alpha < 1.0:
+    st.warning("활성 구성원이 없어 공통 피처만으로 계산합니다.")
 
 try:
-    rec = engine.recommend(cfg, hc, k=k, n_clusters=n_clusters)
+    rec = engine.recommend(cfg, hc, k=k, n_clusters=n_clusters, member_top_n=member_top_n)
 except ValueError as e:
     st.error(f"⚠️ {e}")
     st.stop()
 
 if sort_mode != "종합 적합도":
     key = "sat_min" if sort_mode.startswith("최약자") else "sat_gap"
-    asc = key == "sat_gap"
-    order = rec.scored.sort_values(key, ascending=asc).head(k).index
-    rec.top = rec.scored.loc[order].copy()
+    pool = rec.scored[rec.scored["passes_floor"]] if rec.scored["passes_floor"].any() else rec.scored
+    order = pool.sort_values(key, ascending=(key == "sat_gap")).head(k).index
+    rec.top = pool.loc[order].copy()
     rec.top.insert(0, "rank", range(1, len(order) + 1))
     rec.top = rec.top.join(rec.clusters["cluster"], how="left")
 
 top = rec.top
+d = rec.diagnostics
+active = engine.active_members
 
 # --------------------------------------------------------------------------- #
-# 헤더 지표
+# 헤더
 # --------------------------------------------------------------------------- #
 st.title("🏡 가족 맞춤 주거지 추천")
-st.caption("Multi-Person Weighted K-NN · 가격 배제 · 공통(주거 물리/환경) + 개별(구성원 동선) 결합")
+st.caption("Multi-Person Weighted K-NN · 가격 배제 · 이동은 모두 시간(분) · 비선형 효용 + 파레토")
+
+if len(d["relaxations"]):
+    st.warning(f"⚙️ 하드 제약이 과도해 후보가 {min_candidates}건 미만이었습니다. "
+               f"덜 중요한 제약부터 **{len(d['relaxations'])}단계 자동 완화**해 "
+               f"{d['candidates']}건을 확보했습니다. (모델 진단 탭에서 내역 확인)")
+if d["floor_relaxed"]:
+    st.warning("⚠️ 구성원 하한선을 모두 만족하는 매물이 없어 하한선을 일시 해제했습니다. "
+               "하한선을 낮추거나 발언권을 조정해 보세요.")
+if d["compressed_features"]:
+    st.info("ℹ️ 이상치로 분포가 눌린 피처: " +
+            ", ".join(label_of(c) for c in d["compressed_features"]) +
+            " → 클리핑 비율을 올리거나 RobustScaler 를 쓰세요.")
 
 best = top.iloc[0]
 c = st.columns(6)
-c[0].metric("후보 매물", f"{rec.diagnostics['candidates']}건",
-            f"전체 {rec.diagnostics['total_listings']}건 중")
+c[0].metric("후보 매물", f"{d['candidates']}건", f"전체 {d['total_listings']}건 중")
 c[1].metric("1위 종합 적합도", f"{best['fit_score']:.1f}점")
-c[2].metric("최약자 만족도", f"{best['sat_min']:.1f}점",
-            help="가장 불만족한 구성원의 점수 (Maximin 관점)")
-c[3].metric("이해충돌 지수", f"{best['sat_gap']:.1f}p",
-            help="구성원 간 만족도 최대-최소 격차. 낮을수록 합의가 쉽습니다.")
-c[4].metric("평균 이동부담", f"{best['travel_mean_min']:.0f}분",
+c[2].metric("최약자 만족도", f"{best['sat_min']:.1f}점")
+c[3].metric("이해충돌 지수", f"{best['sat_gap']:.1f}p")
+c[4].metric("평균 이동시간", f"{best['travel_mean_min']:.0f}분",
             f"편차 ±{best['travel_std_min']:.0f}분", delta_color="off")
-c[5].metric("주거 안정성 지수", f"{best['stability_index']:.2f}",
-            help="녹지·주차·일조·단지규모·연식·소음 종합 (0~1)")
+c[5].metric("주거 안정성", f"{best['stability_index']:.2f}")
 
-tabs = st.tabs(["🥇 추천 결과", "⚖️ 이해충돌·파레토", "🗺️ 동선 지도", "🔎 군집 분석", "🧪 모델 진단"])
+tabs = st.tabs(["🥇 추천 결과", "⚖️ 이해충돌·파레토", "🗺️ 동선 지도", "🔎 군집", "🧪 모델 진단"])
 
-# --------------------------------------------------------------------------- #
-# 탭 1: 추천 결과
 # --------------------------------------------------------------------------- #
 with tabs[0]:
     show = {"rank": "순위", "name": "매물", "gu": "지역", "fit_score": "종합",
             "sat__공통": "주거", **{f"sat__{m.key}": m.name for m in active},
             "sat_min": "최약자", "sat_gap": "격차", "area_m2": "면적(m²)", "rooms": "방",
-            "orientation": "향", "building_age": "연식", "green_ratio": "녹지(%)",
+            "parking_slots": "주차", "orientation": "향", "transit_walk_min": "역도보(분)",
+            **{f"burden_min__{m.key}": f"{m.name} 이동(분)" for m in active},
             "travel_mean_min": "평균이동(분)", "travel_std_min": "편차(분)",
             "equity_index": "형평성", "stability_index": "안정성",
             "pareto": "파레토", "cluster": "군집"}
     cols = [c_ for c_ in show if c_ in top.columns]
-    table = top[cols].rename(columns=show)
-
-    st.dataframe(
-        table, use_container_width=True, height=430,
-        column_config={
-            "종합": st.column_config.ProgressColumn("종합", min_value=0, max_value=100, format="%.1f"),
-            "최약자": st.column_config.ProgressColumn("최약자", min_value=0, max_value=100, format="%.1f"),
-            "파레토": st.column_config.CheckboxColumn("파레토"),
-        })
+    st.dataframe(top[cols].rename(columns=show), use_container_width=True, height=430,
+                 column_config={
+                     "종합": st.column_config.ProgressColumn("종합", min_value=0, max_value=100, format="%.1f"),
+                     "최약자": st.column_config.ProgressColumn("최약자", min_value=0, max_value=100, format="%.1f"),
+                     "파레토": st.column_config.CheckboxColumn("파레토")})
 
     st.divider()
     left, right = st.columns([1, 1])
     labels = {i: f"{int(r['rank'])}위 · {r['name']} ({r['fit_score']:.1f}점)" for i, r in top.iterrows()}
     sel = left.selectbox("매물 선택", list(top.index), format_func=lambda i: labels[i])
     compare = right.multiselect("비교 대상 (최대 3)", [i for i in top.index if i != sel],
-                                default=[i for i in top.index if i != sel][:1], max_selections=3,
-                                format_func=lambda i: labels[i])
+                                default=[i for i in top.index if i != sel][:1],
+                                max_selections=3, format_func=lambda i: labels[i])
 
     st.plotly_chart(viz.member_radar(rec, [sel] + compare, active),
                     use_container_width=True, key="radar_members")
-
-    cc = st.columns([1, 1])
+    cc = st.columns(2)
     cc[0].plotly_chart(viz.contribution_bar(rec, sel), use_container_width=True, key="contrib")
-    common_cols = [f.key for f in COMMON_FEATURES if f.key in rec.scaled.columns]
-    cc[1].plotly_chart(viz.feature_radar(rec, [sel] + compare, common_cols,
-                                         "공통(주거) 피처 프로파일 — 정규화 0~1"),
-                       use_container_width=True, key="radar_common")
+    cc[1].plotly_chart(viz.feature_radar(rec, [sel] + compare, list(rec.utility.columns),
+                                         "만족도 프로파일 (1 = 이상점)"),
+                       use_container_width=True, key="radar_features")
 
     r = top.loc[sel]
-    st.info(
-        f"**{r['name']}** · {r['gu']} — 전용 {r['area_m2']:.0f}m² / 방 {int(r['rooms'])} / "
-        f"{r['orientation']}향 / 준공 {int(r['building_age'])}년차 / 녹지 {r['green_ratio']:.0f}% · "
-        + " · ".join(f"{m.name} 이동부담 {r[f'burden_min__{m.key}']:.0f}분" for m in active)
-        + f" → 격차 {r['sat_gap']:.1f}p"
-        + ("  ⭐ **파레토 최적** (누구도 손해보지 않고 개선할 대안이 없음)" if r["pareto"] else ""))
+    parts = [f"{m.name} {r[f'burden_min__{m.key}']:.0f}분" for m in active
+             if f"burden_min__{m.key}" in r and pd.notna(r[f"burden_min__{m.key}"])]
+    st.info(f"**{r['name']}** · {r['gu']} — 전용 {r['area_m2']:.0f}m² / 방 {int(r['rooms'])} / "
+            f"주차 {r['parking_slots']:.2f}대 / {r['orientation']}향 / 역도보 {r['transit_walk_min']:.0f}분"
+            + ("  ·  " + " · ".join(parts) if parts else "")
+            + f"  →  격차 {r['sat_gap']:.1f}p"
+            + ("  ⭐ **파레토 최적**" if r["pareto"] else ""))
 
-# --------------------------------------------------------------------------- #
-# 탭 2: 이해충돌 / 파레토
 # --------------------------------------------------------------------------- #
 with tabs[1]:
     if len(active) < 2:
         st.info("구성원을 2명 이상 활성화하면 트레이드오프 분석이 가능합니다.")
     else:
+        st.markdown("#### 구성원별 독립 Top-N 과 교집합")
+        st.caption("각자 자기 기준으로만 뽑은 상위 매물입니다. 교집합이 있으면 그게 가장 안전한 합의안입니다.")
+        mc = st.columns(len(active))
+        for col, m in zip(mc, active):
+            col.markdown(f"**{m.name}**")
+            for lid in rec.member_tops.get(m.key, []):
+                row = rec.scored.loc[lid]
+                mark = "⭐ " if lid in rec.intersection else ""
+                col.write(f"{mark}{row['name']} · {row[f'sat__{m.key}']:.0f}점")
+        if rec.intersection:
+            st.success("🤝 모두의 Top-N 에 든 매물: " +
+                       ", ".join(rec.scored.loc[i, "name"] for i in rec.intersection))
+        else:
+            st.warning("교집합이 없습니다 — 선호가 실제로 상충합니다. "
+                       "아래 파레토 프론티어에서 균형점을 고르거나, 하한선을 걸어 타협 범위를 좁히세요.")
+
+        st.divider()
         opts = {m.key: m.name for m in active}
         cA, cB = st.columns(2)
         x_key = cA.selectbox("X축 구성원", list(opts), format_func=lambda k_: opts[k_], index=0)
         y_key = cB.selectbox("Y축 구성원", list(opts), format_func=lambda k_: opts[k_],
                              index=min(1, len(opts) - 1))
-        st.plotly_chart(
-            viz.tradeoff_scatter(rec, x_key, y_key, opts[x_key], opts[y_key], list(top.index)),
-            use_container_width=True, key="tradeoff")
+        st.plotly_chart(viz.tradeoff_scatter(rec, x_key, y_key, opts[x_key], opts[y_key],
+                                             list(top.index)),
+                        use_container_width=True, key="tradeoff")
 
         pareto = rec.scored[rec.scored["pareto"]].sort_values("sat_min", ascending=False)
         st.markdown(f"#### 파레토 최적 대안 {len(pareto)}건")
-        st.caption("한 구성원의 만족도를 높이려면 반드시 다른 구성원이 손해를 봐야 하는 '균형점' 집합입니다.")
         pcols = ["name", "gu", "fit_score"] + [f"sat__{m.key}" for m in active] + \
-                ["sat_min", "sat_gap", "travel_mean_min", "equity_index"]
+                ["sat_min", "sat_gap", "travel_mean_min", "passes_floor"]
         st.dataframe(pareto[[c_ for c_ in pcols if c_ in pareto.columns]].head(20).rename(
             columns={"name": "매물", "gu": "지역", "fit_score": "종합",
                      **{f"sat__{m.key}": m.name for m in active},
                      "sat_min": "최약자", "sat_gap": "격차",
-                     "travel_mean_min": "평균이동(분)", "equity_index": "형평성"}),
+                     "travel_mean_min": "평균이동(분)", "passes_floor": "하한선 통과"}),
             use_container_width=True, height=320)
 
-        st.markdown("#### 규칙별 최선의 선택 비교")
-        rules = {
-            "공리주의 (가중 합 최대)": rec.scored.sort_values("distance").index[0],
-            "롤스적 최약자 우선 (Maximin)": rec.scored.sort_values("sat_min", ascending=False).index[0],
-            "형평성 우선 (격차 최소)": rec.scored.sort_values("sat_gap").index[0],
-        }
+        st.markdown("#### 규칙별 최선의 선택")
+        pool = rec.scored[rec.scored["passes_floor"]] if rec.scored["passes_floor"].any() else rec.scored
+        rules = {"공리주의 (가중 합)": pool.sort_values("distance").index[0],
+                 "롤스적 최약자 우선": pool.sort_values("sat_min", ascending=False).index[0],
+                 "형평성 우선 (격차 최소)": pool.sort_values("sat_gap").index[0]}
         rc = st.columns(len(rules))
         for (rule, lid), col in zip(rules.items(), rc):
             row = rec.scored.loc[lid]
@@ -303,10 +388,7 @@ with tabs[1]:
                         use_container_width=True, key="radar_rules")
 
 # --------------------------------------------------------------------------- #
-# 탭 3: 지도
-# --------------------------------------------------------------------------- #
 with tabs[2]:
-    st.caption("추천 매물 위치와, 선택 매물에서 각 구성원의 주요 목적지(직장/학원가)까지의 동선입니다.")
     map_sel = st.selectbox("동선을 볼 매물", list(top.index),
                            format_func=lambda i: labels[i], key="map_sel")
     kind, obj = viz.build_map(top, active, map_sel)
@@ -316,72 +398,73 @@ with tabs[2]:
         st.components.v1.html(obj._repr_html_(), height=560)
     else:
         st.plotly_chart(obj, use_container_width=True, key="map_plotly")
-        st.caption("※ `folium`, `streamlit-folium` 설치 시 folium 지도로 자동 전환됩니다.")
 
     mrow = top.loc[map_sel]
-    mc = st.columns(len(active) or 1)
-    for col, m in zip(mc, active):
-        col.metric(f"{m.name} 이동부담", f"{mrow[f'burden_min__{m.key}']:.0f}분",
-                   f"만족도 {mrow[f'sat__{m.key}']:.1f}점", delta_color="off")
+    for m in active:
+        cols_ = st.columns(max(len(m.enabled_destinations), 1))
+        for col, dst in zip(cols_, m.enabled_destinations):
+            val = mrow.get(dst.column(m.key))
+            col.metric(f"{m.name} → {dst.label}",
+                       f"{val:.0f}분" if pd.notna(val) else "-", TRAVEL_MODES[dst.mode],
+                       delta_color="off")
 
-# --------------------------------------------------------------------------- #
-# 탭 4: 군집
 # --------------------------------------------------------------------------- #
 with tabs[3]:
     if rec.cluster_profile.empty:
-        st.info("군집을 나눌 만큼 추천 매물이 많지 않습니다. K 를 늘려보세요.")
+        st.info("군집을 나눌 만큼 추천 매물이 많지 않습니다.")
     else:
-        st.plotly_chart(viz.cluster_profile_fig(rec.cluster_profile), use_container_width=True, key="clusters")
-        st.markdown("#### 군집별 프로파일 (평균)")
+        st.plotly_chart(viz.cluster_profile_fig(rec.cluster_profile),
+                        use_container_width=True, key="clusters")
         st.dataframe(rec.cluster_profile.rename(columns={
-            "area_m2": "면적(m²)", "rooms": "방", "building_age": "연식", "green_ratio": "녹지(%)",
-            "parking_per_unit": "주차", "travel_mean_min": "평균이동(분)",
+            "area_m2": "면적(m²)", "rooms": "방", "parking_slots": "주차",
+            "transit_walk_min": "역도보(분)", "travel_mean_min": "평균이동(분)",
             "travel_std_min": "이동편차(분)", "stability_index": "안정성", "fit_score": "종합"}),
             use_container_width=True)
-        for cid in sorted(rec.clusters["cluster"].unique()):
-            ids = rec.clusters.index[rec.clusters["cluster"] == cid]
-            with st.expander(f"군집 {cid} — {len(ids)}건"):
-                st.dataframe(top.loc[[i for i in ids if i in top.index],
-                                     ["name", "gu", "fit_score", "area_m2", "green_ratio",
-                                      "travel_mean_min", "sat_gap"]].rename(
-                    columns={"name": "매물", "gu": "지역", "fit_score": "종합", "area_m2": "면적(m²)",
-                             "green_ratio": "녹지(%)", "travel_mean_min": "평균이동(분)", "sat_gap": "격차"}),
-                    use_container_width=True)
 
-# --------------------------------------------------------------------------- #
-# 탭 5: 모델 진단
 # --------------------------------------------------------------------------- #
 with tabs[4]:
-    d = rec.diagnostics
     m1 = st.columns(4)
-    m1[0].metric("사용 피처 수", d["feature_count"], f"공통 {d['common_features']} / 개별 {d['individual_features']}")
-    m1[1].metric("KNNImputer 보정 셀", d["missing_cells"], f"k = {d['impute_k']}")
-    m1[2].metric("이론적 최대 거리", f"{d['d_max']:.3f}")
-    m1[3].metric("스케일링", scaler_kind)
+    m1[0].metric("사용 피처", d["feature_count"],
+                 f"공통 {d['common_features']} / 개별 {d['individual_features']}")
+    m1[1].metric("KNNImputer 보정", f"{d['missing_cells']}셀", f"k = {d['impute_k']}")
+    m1[2].metric("스케일러", d["scaler"], f"클리핑 {d['clip_q']:.1%}")
+    m1[3].metric("하한선 통과", f"{d['eligible']}건", f"전체 후보 {d['candidates']}건")
 
-    if d.get("dropped_features"):
-        st.warning("후보 전체가 결측이라 제외된 피처: " +
-                   ", ".join(label_of(c) for c in d["dropped_features"]))
+    st.markdown("#### ① 이상치 클리핑")
+    if len(d["clip_report"]):
+        st.dataframe(d["clip_report"].assign(피처=lambda x: x["피처"].map(label_of)),
+                     use_container_width=True, hide_index=True)
+    else:
+        st.caption("클리핑된 값이 없습니다.")
+    st.caption("정규화 후 분포 폭(p5~p95) — 좁을수록 이상치에 스케일을 빼앗긴 상태입니다.")
+    st.dataframe(pd.DataFrame({"피처": [label_of(c) for c in d["position_spread"].index],
+                               "분포 폭": d["position_spread"].values}),
+                 use_container_width=True, hide_index=True, height=240)
 
+    st.markdown("#### ② 비선형 효용 변환")
+    st.plotly_chart(viz.utility_curve_fig(), use_container_width=True, key="utility_curve")
+
+    st.markdown("#### ③ 하드 제약 · 백오프")
+    st.dataframe(d["filter_detail"], use_container_width=True, hide_index=True)
+    if len(d["relaxations"]):
+        st.markdown("**자동 완화 내역**")
+        st.dataframe(d["backoff_log"], use_container_width=True, hide_index=True)
+    else:
+        st.caption("완화 없이 조건을 만족했습니다.")
+
+    if len(d["floors"]):
+        st.markdown("#### ④ 구성원 하한선")
+        st.dataframe(d["floors"], use_container_width=True, hide_index=True)
+
+    st.markdown("#### ⑤ 가중치와 이상점")
     st.plotly_chart(viz.weight_bar(rec), use_container_width=True, key="weights")
-
-    st.markdown("#### 하드 제약 필터링 단계")
-    st.dataframe(d["filter_report"], use_container_width=True, hide_index=True)
-
-    st.markdown("#### 가족 이상점 벡터 (Ideal Point)")
-    ideal_df = pd.DataFrame({
+    st.dataframe(pd.DataFrame({
         "피처": [label_of(c) for c in rec.ideal_raw.index],
-        "이상값(원 단위)": rec.ideal_raw.round(1).values,
-        "단위": [FEATURE_BY_KEY[c if "__" not in c else c.split("__", 1)[1]].unit
-                 for c in rec.ideal_raw.index],
-        "방향": [FEATURE_BY_KEY[c if "__" not in c else c.split("__", 1)[1]].direction
-                 for c in rec.ideal_raw.index],
-        "가중치 ω(%)": (rec.weights.values * 100).round(2),
-    })
-    st.dataframe(ideal_df, use_container_width=True, hide_index=True, height=380)
+        "이상값(원 단위)": rec.ideal_raw.values,
+        "가중치 ω(%)": (rec.weights.values * 100).round(2)}),
+        use_container_width=True, hide_index=True)
 
-    st.markdown("#### 가격 배제 검증")
-    st.success("데이터 로딩 시 `assert_no_price_columns()` 통과 — 매매/전세/월세/관리비 컬럼 없음")
-    with st.expander("원천 데이터 컬럼 보기"):
-        st.write("**공통(주거):**", list(listings.columns))
-        st.write("**개별(동선):**", list(individual.columns))
+    st.success("가격 컬럼 없음 · 거리(m) 컬럼 없음 — 이동 지표는 전부 분 단위 시간입니다.")
+    with st.expander("원천 데이터 컬럼"):
+        st.write("**공통/부가:**", list(listings.columns))
+        st.write("**개별(이동 시간, 분):**", list(travel.columns))
