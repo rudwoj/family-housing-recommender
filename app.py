@@ -39,12 +39,6 @@ DATA = os.path.join(BASE, "data")
 st.set_page_config(page_title="가족 맞춤 주거지 추천", page_icon="🏡", layout="wide",
                    initial_sidebar_state="collapsed")
 
-try:
-    from streamlit_folium import st_folium
-    HAS_ST_FOLIUM = True
-except Exception:
-    HAS_ST_FOLIUM = False
-
 PLACE_PRESETS = {
     "여의도": (37.5216, 126.9243), "강남역": (37.4979, 127.0276),
     "광화문": (37.5720, 126.9769), "판교": (37.3947, 127.1112),
@@ -413,17 +407,13 @@ def render_result(conf: dict) -> None:
     hc = HardConstraints(numeric=conf["constraints"], category=conf["categories"],
                          min_candidates=conf["min_candidates"])
 
-    bar = st.columns([1, 4])
-    if bar[0].button("⬅ 설정 수정", use_container_width=True):
-        st.session_state.stage = "setup"
-        st.rerun()
-
-    if not engine.active_members and conf["alpha"] < 1.0:
-        st.warning("활성 구성원이 없어 공통(주택 조건) 피처만으로 계산합니다.")
-
     try:
         rec = engine.recommend(cfg, hc, k=conf["k"])
     except ValueError as e:
+        # 지도(전체 화면)를 못 그리는 경로이므로 여기서는 일반 화면으로 안내한다.
+        if st.button("⬅ 설정 수정"):
+            st.session_state.stage = "setup"
+            st.rerun()
         st.error(f"⚠️ {e}")
         st.stop()
 
@@ -437,9 +427,71 @@ def render_result(conf: dict) -> None:
 
     top, d, active = rec.top, rec.diagnostics, engine.active_members
 
-    st.title("🏡 추천 결과")
-    st.caption("Multi-Person Weighted K-NN · 가격 배제 · 이동은 모두 시간(분)")
+    # ---------------- 전체 화면 지도 (카카오맵 스타일) ---------------- #
+    # 헤더를 숨기고 지도 iframe 을 뷰포트 전체에 고정한다. 진단·상세 정보는
+    # 지도 왼쪽 아래 [상세 정보 보기] 버튼 → 다이얼로그로 제공한다.
+    st.markdown("""
+        <style>
+        header[data-testid="stHeader"] { display: none; }
+        .block-container { padding: 0 !important; max-width: 100% !important; }
+        section[data-testid="stMain"] { overflow: hidden; }
+        iframe[title$="kakao_map"] { position: fixed; inset: 0; z-index: 10;
+                                     width: 100vw !important;
+                                     height: 100vh !important; border: 0; }
+        /* 리런 중 stale 요소가 0.33 으로 어두워지는 것을 완화 — 지도가 거의
+           그대로 보이고, 로딩 표시는 지도 컴포넌트가 중앙에 직접 띄운다. */
+        [data-stale="true"], .stale-element { opacity: 0.9 !important; }
+        </style>""", unsafe_allow_html=True)
 
+    # 선택 상태: 컴포넌트가 돌려준 클릭 값 → session_state → 기본 1위
+    map_sel = st.session_state.get("map_sel")
+    if map_sel not in top.index:
+        map_sel = top.index[0]
+    r_sel = top.loc[map_sel]
+
+    routes: dict[tuple[str, str], dict] = {}
+    settings = load_settings()
+    odsay_key = read_api_key("ODSAY_API_KEY")
+    tmap_key = read_api_key("TMAP_APP_KEY")
+    # 지도 동선은 "선택한 매물 1건" 에 대해서만 조회하므로 호출이 몇 건뿐이다.
+    # 전체 매물 × 목적지를 도는 이동시간 계산(경로 API 토글)과 달리 항상
+    # 실제 경로를 가져온다 — 토글이 꺼져 있다고 대중교통까지 직선으로 그리면
+    # 지나는 역을 하나도 안 보여주게 된다.
+    if settings.has_kakao_key or odsay_key or tmap_key:
+        with st.spinner("실제 동선 조회 중..."):
+            for m in active:
+                for dst in m.enabled_destinations:
+                    routes[(m.key, dst.key)] = fetch_real_route(
+                        float(r_sel["lat"]), float(r_sel["lon"]),
+                        float(dst.lat), float(dst.lon), dst.mode,
+                        settings.kakao_rest_api_key, odsay_key, tmap_key)
+
+    # 카카오 JS 키가 있으면 카카오맵, 없으면 Leaflet(OSM) — 오버레이 UI 는 동일.
+    js_key = settings.kakao_javascript_key if settings.has_kakao_js_key else ""
+    act = viz_kakao.render_map_view(top, active, map_sel, routes, js_key,
+                                    height=640, key="map_view")
+    # 컴포넌트 값은 세션 동안 유지되므로, nonce(n)가 바뀐 새 이벤트만 처리한다.
+    if isinstance(act, dict) and act.get("n") != st.session_state.get("map_view_n"):
+        st.session_state["map_view_n"] = act.get("n")
+        kind, aid = act.get("action"), act.get("id")
+        if kind == "back":
+            st.session_state.stage = "setup"
+            st.rerun()
+        elif kind == "select" and aid in top.index and aid != map_sel:
+            st.session_state["map_sel"] = aid
+            st.rerun()
+        elif kind == "detail":
+            detail_dialog(rec, top, active, d, conf, map_sel, js_key)
+
+
+# =========================================================================== #
+# 상세 분석 다이얼로그 — 지도 왼쪽 아래 [상세 정보 보기] 로 연다
+# =========================================================================== #
+@st.dialog("📊 상세 분석", width="large")
+def detail_dialog(rec, top, active, d, conf, map_sel: str, js_key: str) -> None:
+    # 진단 메시지 (전체 화면 지도에서는 자리가 없어 여기서 보여준다)
+    if not active and conf["alpha"] < 1.0:
+        st.warning("활성 구성원이 없어 공통(주택 조건) 피처만으로 계산했습니다.")
     if len(d["relaxations"]):
         st.warning(f"⚙️ 하드 제약이 과도해 후보가 {conf['min_candidates']}건 미만이었습니다. "
                    f"덜 중요한 제약부터 **{len(d['relaxations'])}단계 자동 완화**해 "
@@ -454,148 +506,56 @@ def render_result(conf: dict) -> None:
                 " → 클리핑 비율을 올리거나 RobustScaler 를 쓰세요.")
 
     best = top.iloc[0]
-    c = st.columns(3)
-    c[0].metric("후보 매물", f"{d['candidates']}건", f"전체 {d['total_listings']}건 중")
-    c[1].metric("1위 종합 적합도", f"{best['fit_score']:.1f}점")
-    c[2].metric("최약자 만족도", f"{best['sat_min']:.1f}점")
+    st.caption(f"후보 {d['candidates']}건 / 전체 {d['total_listings']}건 · "
+               f"1위 적합도 {best['fit_score']:.1f}점 · 최약자 {best['sat_min']:.1f}점")
 
+    # 선택 매물 요약 한 줄
+    r_sel = top.loc[map_sel]
+    parts = [f"{m.name} {r_sel[f'burden_min__{m.key}']:.0f}분" for m in active
+             if f"burden_min__{m.key}" in r_sel and pd.notna(r_sel[f"burden_min__{m.key}"])]
+    st.info(f"**{r_sel['name']}** · {r_sel['gu']} — 전용 {r_sel['area_m2']:.0f}m² / "
+            f"방 {int(r_sel['rooms'])} / 주차 {r_sel['parking_slots']:.2f}대 / "
+            f"{r_sel['orientation']}향 / 역도보 {r_sel['transit_walk_min']:.0f}분"
+            + ("  ·  " + " · ".join(parts) if parts else ""))
+
+    main_cols = {"rank": "순위", "name": "매물", "gu": "지역", "fit_score": "종합",
+                 "sat__공통": "주거", **{f"sat__{m.key}": m.name for m in active},
+                 "sat_min": "최약자", "sat_gap": "격차", "area_m2": "면적(m²)",
+                 "rooms": "방", "parking_slots": "주차", "orientation": "향"}
+    detail_cols = {"name": "매물", "transit_walk_min": "역도보(분)",
+                   **{f"burden_min__{m.key}": f"{m.name} 이동(분)" for m in active},
+                   "travel_mean_min": "평균이동(분)", "travel_std_min": "편차(분)",
+                   "equity_index": "형평성", "green_ratio": "녹지(%)",
+                   "building_age": "연식(년)", "daylight_hours": "일조(h)",
+                   "noise_db": "소음(dB)"}
+    st.dataframe(top[[c_ for c_ in main_cols if c_ in top.columns]].rename(columns=main_cols),
+                 use_container_width=True, height=380,
+                 column_config={
+                     "종합": st.column_config.ProgressColumn("종합", min_value=0,
+                                                           max_value=100, format="%.1f"),
+                     "최약자": st.column_config.ProgressColumn("최약자", min_value=0,
+                                                            max_value=100, format="%.1f")})
+    with st.expander("이동 시간과 주거 환경", expanded=False):
+        st.dataframe(
+            top[[c_ for c_ in detail_cols if c_ in top.columns]].rename(columns=detail_cols),
+            use_container_width=True, height=380)
+
+    st.divider()
+    # 지도에서 선택한 매물을 기준으로 비교한다.
     labels = {i: f"{int(r['rank'])}위 · {r['name']} ({r['fit_score']:.1f}점)"
               for i, r in top.iterrows()}
-    tabs = st.tabs(["🥇 추천 결과", "🗺️ 동선 지도"])
+    compare = st.multiselect("비교 대상 (최대 3)",
+                             [i for i in top.index if i != map_sel],
+                             default=[i for i in top.index if i != map_sel][:1],
+                             max_selections=3, format_func=lambda i: labels[i])
+    st.plotly_chart(viz.member_radar(rec, [map_sel] + compare, active),
+                    use_container_width=True, key="radar_members")
+    st.plotly_chart(viz.feature_radar(rec, [map_sel] + compare, list(rec.utility.columns),
+                                      "만족도 프로파일 (1 = 이상점)"),
+                    use_container_width=True, key="radar_features")
 
-    with tabs[0]:
-        main_cols = {"rank": "순위", "name": "매물", "gu": "지역", "fit_score": "종합",
-                     "sat__공통": "주거", **{f"sat__{m.key}": m.name for m in active},
-                     "sat_min": "최약자", "sat_gap": "격차", "area_m2": "면적(m²)",
-                     "rooms": "방", "parking_slots": "주차", "orientation": "향"}
-        detail_cols = {"name": "매물", "transit_walk_min": "역도보(분)",
-                       **{f"burden_min__{m.key}": f"{m.name} 이동(분)" for m in active},
-                       "travel_mean_min": "평균이동(분)", "travel_std_min": "편차(분)",
-                       "equity_index": "형평성", "green_ratio": "녹지(%)",
-                       "building_age": "연식(년)", "daylight_hours": "일조(h)",
-                       "noise_db": "소음(dB)"}
-
-        st.dataframe(top[[c_ for c_ in main_cols if c_ in top.columns]].rename(columns=main_cols),
-                     use_container_width=True, height=430,
-                     column_config={
-                         "종합": st.column_config.ProgressColumn("종합", min_value=0,
-                                                               max_value=100, format="%.1f"),
-                         "최약자": st.column_config.ProgressColumn("최약자", min_value=0,
-                                                                max_value=100, format="%.1f")})
-        with st.expander("상세보기 — 이동 시간과 주거 환경", expanded=False):
-            st.dataframe(
-                top[[c_ for c_ in detail_cols if c_ in top.columns]].rename(columns=detail_cols),
-                use_container_width=True, height=430)
-
-        st.divider()
-        left, right = st.columns(2)
-        sel = left.selectbox("매물 선택", list(top.index), format_func=lambda i: labels[i])
-        compare = right.multiselect("비교 대상 (최대 3)", [i for i in top.index if i != sel],
-                                    default=[i for i in top.index if i != sel][:1],
-                                    max_selections=3, format_func=lambda i: labels[i])
-
-        st.plotly_chart(viz.member_radar(rec, [sel] + compare, active),
-                        use_container_width=True, key="radar_members")
-        st.plotly_chart(viz.feature_radar(rec, [sel] + compare, list(rec.utility.columns),
-                                          "만족도 프로파일 (1 = 이상점)"),
-                        use_container_width=True, key="radar_features")
-
-        r = top.loc[sel]
-        parts = [f"{m.name} {r[f'burden_min__{m.key}']:.0f}분" for m in active
-                 if f"burden_min__{m.key}" in r and pd.notna(r[f"burden_min__{m.key}"])]
-        st.info(f"**{r['name']}** · {r['gu']} — 전용 {r['area_m2']:.0f}m² / "
-                f"방 {int(r['rooms'])} / 주차 {r['parking_slots']:.2f}대 / "
-                f"{r['orientation']}향 / 역도보 {r['transit_walk_min']:.0f}분"
-                + ("  ·  " + " · ".join(parts) if parts else ""))
-
-    with tabs[1]:
-        # 후보가 바뀌면 이전 선택이 목록에 없을 수 있으므로 key 를 두지 않는다.
-        map_sel = st.selectbox("동선을 볼 매물", list(top.index),
-                               format_func=lambda i: labels[i])
-        r_sel = top.loc[map_sel]
-
-        routes: dict[tuple[str, str], dict] = {}
-        settings = load_settings()
-        odsay_key = read_api_key("ODSAY_API_KEY")
-        tmap_key = read_api_key("TMAP_APP_KEY")
-        # 지도 동선은 "선택한 매물 1건" 에 대해서만 조회하므로 호출이 몇 건뿐이다.
-        # 전체 매물 × 목적지를 도는 이동시간 계산(경로 API 토글)과 달리 항상
-        # 실제 경로를 가져온다 — 토글이 꺼져 있다고 대중교통까지 직선으로 그리면
-        # 지나는 역을 하나도 안 보여주게 된다.
-        if settings.has_kakao_key or odsay_key or tmap_key:
-            with st.spinner("실제 동선 조회 중..."):
-                for m in active:
-                    for dst in m.enabled_destinations:
-                        routes[(m.key, dst.key)] = fetch_real_route(
-                            float(r_sel["lat"]), float(r_sel["lon"]),
-                            float(dst.lat), float(dst.lon), dst.mode,
-                            settings.kakao_rest_api_key, odsay_key, tmap_key)
-
-        if settings.has_kakao_js_key:
-            # components.html(=about:srcdoc) 이 아니라 커스텀 컴포넌트로 띄운다.
-            # srcdoc 문서에서는 카카오 SDK 가 location.protocol 을 "about:" 으로
-            # 읽어 2단계 스크립트를 http 로 요청하고, mixed content 로 막힌다.
-            viz_kakao.render_kakao_map(top, active, map_sel, routes,
-                                       settings.kakao_javascript_key,
-                                       height=560, key="kakao_map")
-        else:
-            kind, obj = viz.build_map(top, active, map_sel, routes=routes)
-            if kind == "folium" and HAS_ST_FOLIUM:
-                st_folium(obj, height=560, use_container_width=True)
-            elif kind == "folium":
-                st.components.v1.html(obj._repr_html_(), height=560)
-            else:
-                st.plotly_chart(obj, use_container_width=True, key="map_plotly")
-            st.caption("ℹ️ `KAKAO_JAVASCRIPT_KEY` 를 설정하면 카카오맵으로 표시됩니다.")
-
-        if routes:
-            badge = {"real": "✅ 실제 경로", "walk": "➖ 직선(도보)",
-                     "no_route": "⚠️ 경로 없음", "error": "❌ 조회 실패",
-                     "no_key": "➖ 키 없음"}
-            rows = []
-            for m in active:
-                for dst in m.enabled_destinations:
-                    info = routes.get((m.key, dst.key), {})
-                    rows.append({"구성원": m.name, "목적지": dst.label,
-                                 "이동수단": TRAVEL_MODES[dst.mode],
-                                 "경로": badge.get(info.get("status"), "-"),
-                                 "비고": info.get("reason", "")})
-            status = pd.DataFrame(rows)
-            with st.expander("경로 조회 상태 — 왜 어떤 선은 직선인가", expanded=True):
-                st.dataframe(status, use_container_width=True, hide_index=True)
-                failed = status[status["경로"] == "❌ 조회 실패"]
-                if not failed.empty:
-                    why = " ".join(failed["비고"].astype(str))
-                    if "OPEN_MAP_AND_LOCAL" in why:
-                        st.warning(
-                            "대중교통 경로가 `disabled OPEN_MAP_AND_LOCAL` 로 막혔습니다. "
-                            "지금 쓰는 **REST API 키의 앱**에서 "
-                            "[제품 설정 > 카카오맵] 사용 설정이 꺼져 있다는 뜻입니다. "
-                            "자동차 길찾기(카카오모빌리티)는 권한이 달라 이 설정과 무관하게 동작하므로, "
-                            "차만 되고 대중교통만 실패한다면 십중팔구 이 경우입니다. "
-                            "앱이 여러 개라면 배포본 Secrets 의 키가 다른 앱 것은 아닌지도 확인하세요.")
-                    else:
-                        st.warning(
-                            "대중교통 경로 조회에 실패했습니다. 디벨로퍼스 콘솔에서 "
-                            "[내 애플리케이션 > 제품 설정 > 카카오맵] 사용 설정을 확인하세요. "
-                            "자동차 길찾기(카카오모빌리티)와 권한이 다릅니다.")
-
-                # 지도 선과 별개로, 이동 "시간" 이 추정치로 떨어진 이동수단도 알린다.
-                # (도보는 API 자체가 없으니 굳이 경고하지 않는다)
-                api_notes = {m: r for m, r in travel_fallbacks.items() if m != "walk"}
-                if api_notes:
-                    st.info("이동 **시간**을 실제 API 로 못 받아 추정치로 계산한 이동수단: "
-                            + " / ".join(f"{TRAVEL_MODES.get(m, m)} — {r}"
-                                         for m, r in api_notes.items()))
-
-        mrow = top.loc[map_sel]
-        for m in active:
-            cols_ = st.columns(max(len(m.enabled_destinations), 1))
-            for col, dst in zip(cols_, m.enabled_destinations):
-                val = mrow.get(dst.column(m.key))
-                col.metric(f"{m.name} → {dst.label}",
-                           f"{val:.0f}분" if pd.notna(val) else "-",
-                           TRAVEL_MODES[dst.mode], delta_color="off")
+    if not js_key:
+        st.caption("ℹ️ `KAKAO_JAVASCRIPT_KEY` 를 설정하면 카카오맵으로 표시됩니다.")
 
 
 # =========================================================================== #

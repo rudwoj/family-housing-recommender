@@ -32,6 +32,11 @@
     post({type: "streamlit:setFrameHeight", height: h});
   }
 
+  // 주입된 지도 스크립트가 선택한 매물 id 를 파이썬으로 돌려줄 때 쓴다.
+  window.__STREAMLIT_SET_VALUE__ = function (v) {
+    post({type: "streamlit:setComponentValue", value: v, dataType: "json"});
+  };
+
   // innerHTML 로 넣은 <script> 는 실행되지 않으므로, 스크립트만 떼어내
   // 순서대로 다시 만들어 붙인다. src 스크립트는 로드를 기다린다.
   function inject(html, done) {
@@ -39,8 +44,10 @@
     var scripts = [].slice.call(doc.querySelectorAll("script"));
     scripts.forEach(function (s) { s.parentNode.removeChild(s); });
 
+    // 파서가 문서 앞머리의 <style>/<link> 를 head 로 끌어올리므로,
+    // body 만 주입하면 스타일이 통째로 사라진다. head 내용도 같이 넣는다.
     var root = document.getElementById("root");
-    root.innerHTML = doc.body.innerHTML;
+    root.innerHTML = (doc.head ? doc.head.innerHTML : "") + doc.body.innerHTML;
 
     (function next(i) {
       if (i >= scripts.length) { done && done(); return; }
