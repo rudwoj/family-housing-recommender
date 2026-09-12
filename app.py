@@ -31,6 +31,7 @@ from src.schema import (COMMON_FEATURES, DEFAULT_MEMBER_COUNT, MAX_MEMBERS,
                         make_default_members)
 from src.travel import (ApiTravelProvider, EstimatedTravelProvider, travel_matrix,
                         _secret as read_api_key)
+from scripts.fetch_real_dataset import build_live_listings
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
@@ -51,6 +52,13 @@ SORT_MODES = ["종합 적합도", "최약자 우선 (Maximin)", "형평성 우�
 @st.cache_data(show_spinner=False)
 def load_listings() -> pd.DataFrame:
     return derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
+
+
+@st.cache_data(show_spinner="공공데이터에서 최신 주거 후보를 불러오는 중...", ttl=21600)
+def load_latest_public_listings() -> tuple[pd.DataFrame, dict]:
+    """파일 저장 없이 최신 공공데이터 후보를 생성한다."""
+    fresh, stats = build_live_listings(load_settings())
+    return derive_common_features(fresh), stats.as_dict()
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -113,9 +121,9 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
 
 
 @st.cache_data(show_spinner="이동 시간 계산 중...")
-def compute_travel(signature: tuple, use_api: bool) -> tuple[pd.DataFrame, dict]:
+def compute_travel(signature: tuple, use_api: bool,
+                   listings: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """이동 시간표와 함께, 어떤 이동수단이 왜 추정치로 떨어졌는지도 돌려준다."""
-    listings = load_listings()
     members = [Member(key=mk, name=mk, color="#000",
                       destinations=[Destination(key=dk, label=dk, lat=la, lon=lo, mode=mo)])
                for mk, dk, la, lo, mo in signature]
@@ -130,8 +138,19 @@ if not os.path.exists(os.path.join(DATA, "listings.csv")):
     st.error("데이터가 없습니다. 먼저 실행하세요:  `python data/generate_mock_data.py`")
     st.stop()
 
-listings = load_listings()
 st.session_state.setdefault("stage", "setup")
+st.session_state.setdefault("listing_source", "bundled")
+st.session_state.setdefault("listing_source_error", "")
+
+listings = load_listings()
+public_listing_stats: dict | None = None
+if st.session_state.listing_source == "public":
+    try:
+        listings, public_listing_stats = load_latest_public_listings()
+        st.session_state.listing_source_error = ""
+    except Exception as e:
+        st.session_state.listing_source = "bundled"
+        st.session_state.listing_source_error = str(e)
 
 
 # =========================================================================== #
@@ -183,6 +202,23 @@ def render_setup() -> None:
 
     st.title("🏡 가족 맞춤 주거지 추천")
     st.caption("가격은 반영하지 않습니다. 주택의 공간 조건과 구성원별 이동 시간(분)만으로 계산합니다.")
+    settings = load_settings()
+    can_load_public = settings.has_data_go_kr_key and settings.has_kakao_key
+    source_col, action_col = st.columns([3, 2])
+    if st.session_state.listing_source == "public" and public_listing_stats:
+        source_col.success(
+            f"최신 공공데이터 후보 {len(listings)}건 사용 중 · 지하철역 실측 {public_listing_stats['real']}건")
+    else:
+        source_col.info("기본 내장 후보 데이터를 사용 중입니다.")
+    if action_col.button("최신 공공데이터 후보 불러오기", disabled=not can_load_public,
+                         use_container_width=True):
+        load_latest_public_listings.clear()
+        st.session_state.listing_source = "public"
+        st.rerun()
+    if not can_load_public:
+        st.caption("공공데이터 최신 후보는 Secrets에 `DATA_GO_KR_SERVICE_KEY`와 `KAKAO_REST_API_KEY`를 모두 설정하면 사용할 수 있습니다.")
+    elif st.session_state.listing_source_error:
+        st.warning(f"공공데이터 후보 갱신에 실패해 기본 데이터를 사용합니다: {st.session_state.listing_source_error}")
     st.markdown("#### 아래 조건을 입력하고 맨 아래 **확인하기**를 누르세요.")
     st.divider()
 
@@ -358,7 +394,7 @@ def render_result(conf: dict) -> None:
     members: list[Member] = conf["members"]
     signature = tuple(sorted((m.key, d.key, round(d.lat, 5), round(d.lon, 5), d.mode)
                              for m in members for d in m.enabled_destinations))
-    travel, travel_fallbacks = compute_travel(signature, conf["use_api"])
+    travel, travel_fallbacks = compute_travel(signature, conf["use_api"], listings)
 
     engine = FamilyHousingRecommender(listings, travel, members,
                                       scaler=conf["scaler"], clip_q=conf["clip_q"])

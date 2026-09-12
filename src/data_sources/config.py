@@ -21,6 +21,28 @@ from .public_data import DEFAULT_APT_RENT_ENDPOINT
 _ENV_LOADED = False
 
 
+def _read_secret(name: str) -> str:
+    """환경변수와 Streamlit Cloud Secrets에서 설정값을 안전하게 읽는다.
+
+    로컬 실행과 데이터 수집 스크립트는 ``.env``/환경변수를 사용한다. 반면
+    Streamlit Community Cloud에서 Settings > Secrets로 추가한 값은 일반적인
+    ``os.environ``이 아니라 ``st.secrets``에 있으므로, 배포 환경에서는 여기서
+    명시적으로 읽어야 한다.
+    """
+    value = os.environ.get(name, "")
+    if value:
+        return value.strip()
+
+    try:
+        import streamlit as st
+
+        secret = st.secrets.get(name, "")
+        return str(secret).strip() if secret is not None else ""
+    except Exception:
+        # Streamlit 외부에서 실행하거나 Secrets 파일이 아직 없을 수 있다.
+        return ""
+
+
 def _ensure_env_loaded() -> None:
     global _ENV_LOADED
     if not _ENV_LOADED:
@@ -77,18 +99,18 @@ class Settings:
 def load_settings() -> Settings:
     _ensure_env_loaded()
 
-    raw_key = os.environ.get("DATA_GO_KR_SERVICE_KEY", "")
-    kakao_key = os.environ.get("KAKAO_REST_API_KEY", "").strip()
-    kakao_js_key = os.environ.get("KAKAO_JAVASCRIPT_KEY", "").strip()
+    raw_key = _read_secret("DATA_GO_KR_SERVICE_KEY")
+    kakao_key = _read_secret("KAKAO_REST_API_KEY")
+    kakao_js_key = _read_secret("KAKAO_JAVASCRIPT_KEY")
 
-    codes_raw = os.environ.get("TARGET_SIGUNGU_CODES", "").strip()
+    codes_raw = _read_secret("TARGET_SIGUNGU_CODES")
     codes = [c.strip() for c in codes_raw.split(",") if c.strip()] or list(DEFAULT_SIGUNGU_CODES)
 
-    max_n = os.environ.get("MAX_COMPLEXES_PER_SIGUNGU", "0").strip()
-    interval = os.environ.get("REQUEST_INTERVAL_SEC", "0.2").strip()
+    max_n = _read_secret("MAX_COMPLEXES_PER_SIGUNGU") or "0"
+    interval = _read_secret("REQUEST_INTERVAL_SEC") or "0.2"
 
-    rent_endpoint = os.environ.get("DATA_GO_KR_APT_RENT_ENDPOINT", "").strip() or DEFAULT_APT_RENT_ENDPOINT
-    deal_ym = os.environ.get("TARGET_DEAL_YM", "").strip() or _previous_year_month()
+    rent_endpoint = _read_secret("DATA_GO_KR_APT_RENT_ENDPOINT") or DEFAULT_APT_RENT_ENDPOINT
+    deal_ym = _read_secret("TARGET_DEAL_YM") or _previous_year_month()
 
     return Settings(
         data_go_kr_service_key=_normalize_data_go_kr_key(raw_key) if raw_key else "",

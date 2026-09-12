@@ -66,7 +66,6 @@ class Stats:
     def as_dict(self) -> dict:
         return vars(self)
 
-
 def fetch_raw_rent_rows(settings, stats: Stats) -> list[dict]:
     """전월세 실거래가 API에서 시군구별로 원시 행을 모으고 가격 필드를 제거한다."""
     raw_rows = []
@@ -153,7 +152,6 @@ def geocode_rows(raw_rows: list[dict], settings, stats: Stats) -> list[dict]:
 
     return geocoded
 
-
 def fetch_transit_walk_minutes(geocoded: list[dict], settings, rng: np.random.Generator,
                                stats: Stats) -> list[float]:
     """카카오 로컬 API로 가장 가까운 지하철역까지의 거리를 조회해 도보 시간(분)으로 환산한다.
@@ -223,6 +221,25 @@ def build_listings(geocoded: list[dict], transit_walk_min: list[float],
     assert_no_price_columns(df.columns)
     return df
 
+
+def build_live_listings(settings) -> tuple[pd.DataFrame, Stats]:
+    """공공데이터와 카카오 API에서 추천 후보를 메모리에 생성한다.
+
+    CLI 배치와 Streamlit 앱이 같은 수집 규칙을 사용하며, 이 함수는 파일을 쓰지
+    않아 Community Cloud의 읽기 전용 배포 환경에서도 호출할 수 있다.
+    """
+    if not settings.has_data_go_kr_key or not settings.has_kakao_key:
+        raise ValueError("DATA_GO_KR_SERVICE_KEY와 KAKAO_REST_API_KEY가 모두 필요합니다.")
+
+    stats = Stats()
+    rng = np.random.default_rng(SEED)
+    raw_rows = fetch_raw_rent_rows(settings, stats)
+    geocoded = geocode_rows(raw_rows, settings, stats)
+    if not geocoded:
+        raise ValueError("공공데이터에서 좌표가 확인된 후보를 가져오지 못했습니다.")
+
+    transit_walk_min = fetch_transit_walk_minutes(geocoded, settings, rng, stats)
+    return build_listings(geocoded, transit_walk_min, rng), stats
 
 def main() -> None:
     ap = argparse.ArgumentParser()
