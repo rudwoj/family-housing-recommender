@@ -53,6 +53,7 @@ DEFAULT_SIGUNGU_CODES = [
 class Settings:
     data_go_kr_service_key: str
     kakao_rest_api_key: str
+    kakao_javascript_key: str = ""
     apt_rent_endpoint: str = DEFAULT_APT_RENT_ENDPOINT
     target_sigungu_codes: list[str] = field(default_factory=lambda: list(DEFAULT_SIGUNGU_CODES))
     target_deal_ym: str = field(default_factory=_previous_year_month)
@@ -67,12 +68,18 @@ class Settings:
     def has_kakao_key(self) -> bool:
         return bool(self.kakao_rest_api_key)
 
+    @property
+    def has_kakao_js_key(self) -> bool:
+        """지도 렌더링용 JavaScript 키. REST API 키와 별개로 발급된다."""
+        return bool(self.kakao_javascript_key)
+
 
 def load_settings() -> Settings:
     _ensure_env_loaded()
 
     raw_key = os.environ.get("DATA_GO_KR_SERVICE_KEY", "")
     kakao_key = os.environ.get("KAKAO_REST_API_KEY", "").strip()
+    kakao_js_key = os.environ.get("KAKAO_JAVASCRIPT_KEY", "").strip()
 
     codes_raw = os.environ.get("TARGET_SIGUNGU_CODES", "").strip()
     codes = [c.strip() for c in codes_raw.split(",") if c.strip()] or list(DEFAULT_SIGUNGU_CODES)
@@ -86,6 +93,7 @@ def load_settings() -> Settings:
     return Settings(
         data_go_kr_service_key=_normalize_data_go_kr_key(raw_key) if raw_key else "",
         kakao_rest_api_key=kakao_key,
+        kakao_javascript_key=kakao_js_key,
         apt_rent_endpoint=rent_endpoint,
         target_sigungu_codes=codes,
         target_deal_ym=deal_ym,
