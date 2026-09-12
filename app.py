@@ -458,10 +458,12 @@ def render_result(conf: dict) -> None:
                             settings.kakao_rest_api_key)
 
         if settings.has_kakao_js_key:
-            st.components.v1.html(
-                viz_kakao.kakao_map_html(top, active, map_sel, routes,
-                                         settings.kakao_javascript_key),
-                height=580)
+            # components.html(=about:srcdoc) 이 아니라 커스텀 컴포넌트로 띄운다.
+            # srcdoc 문서에서는 카카오 SDK 가 location.protocol 을 "about:" 으로
+            # 읽어 2단계 스크립트를 http 로 요청하고, mixed content 로 막힌다.
+            viz_kakao.render_kakao_map(top, active, map_sel, routes,
+                                       settings.kakao_javascript_key,
+                                       height=560, key="kakao_map")
         else:
             kind, obj = viz.build_map(top, active, map_sel, routes=routes)
             if kind == "folium" and HAS_ST_FOLIUM:
