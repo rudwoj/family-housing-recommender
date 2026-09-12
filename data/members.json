@@ -2,31 +2,82 @@
   {
     "key": "dad",
     "name": "아빠",
-    "role": "worker",
     "color": "#2563eb",
-    "anchor_label": "여의도 직장",
-    "anchor_lat": 37.5216,
-    "anchor_lon": 126.9243,
-    "priority": 1.0
+    "priority": 1.0,
+    "min_satisfaction": 0.0,
+    "destinations": [
+      {
+        "key": "work",
+        "label": "여의도 직장",
+        "lat": 37.5216,
+        "lon": 126.9243,
+        "mode": "transit",
+        "weight": 1.0,
+        "enabled": true
+      },
+      {
+        "key": "gym",
+        "label": "운동 시설",
+        "lat": 37.53,
+        "lon": 126.93,
+        "mode": "walk",
+        "weight": 0.4,
+        "enabled": false
+      }
+    ]
   },
   {
     "key": "mom",
     "name": "엄마",
-    "role": "worker",
     "color": "#db2777",
-    "anchor_label": "강남 직장",
-    "anchor_lat": 37.4979,
-    "anchor_lon": 127.0276,
-    "priority": 1.0
+    "priority": 1.0,
+    "min_satisfaction": 0.0,
+    "destinations": [
+      {
+        "key": "work",
+        "label": "강남 직장",
+        "lat": 37.4979,
+        "lon": 127.0276,
+        "mode": "drive",
+        "weight": 1.0,
+        "enabled": true
+      },
+      {
+        "key": "mart",
+        "label": "대형마트",
+        "lat": 37.51,
+        "lon": 127.02,
+        "mode": "drive",
+        "weight": 0.5,
+        "enabled": true
+      }
+    ]
   },
   {
     "key": "child",
     "name": "자녀",
-    "role": "student",
     "color": "#059669",
-    "anchor_label": "대치 학원가",
-    "anchor_lat": 37.4995,
-    "anchor_lon": 127.063,
-    "priority": 1.0
+    "priority": 1.0,
+    "min_satisfaction": 0.0,
+    "destinations": [
+      {
+        "key": "school",
+        "label": "학교",
+        "lat": 37.505,
+        "lon": 127.045,
+        "mode": "walk",
+        "weight": 1.0,
+        "enabled": true
+      },
+      {
+        "key": "academy",
+        "label": "대치 학원가",
+        "lat": 37.4995,
+        "lon": 127.063,
+        "mode": "transit",
+        "weight": 0.8,
+        "enabled": true
+      }
+    ]
   }
 ]
