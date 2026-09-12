@@ -15,6 +15,7 @@ Provider 를 갈아끼우는 구조라, 실제 경로 API 키가 있으면 그�
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -80,58 +81,87 @@ class EstimatedTravelProvider(TravelProvider):
 
 class ApiTravelProvider(TravelProvider):
     """
-    외부 경로 API 연동 지점.
+    실제 경로 API 연동.
 
-    환경변수로 키를 주면 사용한다.
-      KAKAO_REST_API_KEY : 자동차 경로 (Kakao Mobility)
-      ODSAY_API_KEY      : 대중교통 경로 (ODsay)
-    키가 없거나 호출이 실패하면 추정치로 폴백한다.
+      KAKAO_REST_API_KEY : 자동차(카카오모빌리티) + 대중교통(카카오맵 경로 조회)
+      ODSAY_API_KEY      : 대중교통 대체 경로 (카카오 키가 없을 때만)
+
+    도보는 카카오/ODsay 모두 전용 길찾기 API 가 없어 거리 기반 추정을 쓴다.
+    호출이 실패하면 해당 매물만 추정치로 메운다(전체를 버리지 않는다).
     매물 수 × 목적지 수만큼 호출이 발생하므로 캐시를 반드시 함께 쓸 것.
     """
 
     name = "경로 API"
 
-    def __init__(self, fallback: TravelProvider | None = None, timeout: float = 3.0):
+    #: 대중교통까지 켜면 호출 수가 배로 늘어 순차 호출은 너무 느리다.
+    MAX_WORKERS = 6
+
+    def __init__(self, fallback: TravelProvider | None = None, timeout: float = 6.0):
         self.fallback = fallback or EstimatedTravelProvider()
         self.timeout = timeout
         self.kakao_key = os.getenv("KAKAO_REST_API_KEY")
         self.odsay_key = os.getenv("ODSAY_API_KEY")
+        #: 모드별 마지막 실패 사유 — 화면에서 "왜 추정치인가" 를 보여주기 위함
+        self.last_error: dict[str, str] = {}
 
     @property
     def available(self) -> bool:
         return bool(self.kakao_key or self.odsay_key)
 
-    def minutes(self, lat, lon, dest: Destination, mode: str) -> np.ndarray:
-        if not self.available or mode == "walk":
-            return self.fallback.minutes(lat, lon, dest, mode)
-        try:
-            return self._call_api(lat, lon, dest, mode)
-        except Exception:
-            return self.fallback.minutes(lat, lon, dest, mode)
+    def supports(self, mode: str) -> bool:
+        """실제 API 로 계산 가능한 모드인지."""
+        if mode == "drive":
+            return bool(self.kakao_key)
+        if mode == "transit":
+            return bool(self.kakao_key or self.odsay_key)
+        return False                      # walk: 전용 길찾기 API 가 없다
 
-    def _call_api(self, lat, lon, dest: Destination, mode: str) -> np.ndarray:
+    def minutes(self, lat, lon, dest: Destination, mode: str) -> np.ndarray:
+        est = self.fallback.minutes(lat, lon, dest, mode)
+        if not self.supports(mode):
+            if mode == "walk":
+                self.last_error.setdefault(mode, "도보 전용 길찾기 API 없음 — 거리 기반 추정")
+            return est
+
+        lats, lons = np.asarray(lat, dtype=float), np.asarray(lon, dtype=float)
+        out = np.array(est, dtype=float, copy=True)
+
+        def one(i: int) -> tuple[int, float | None]:
+            try:
+                return i, self._one_minute(float(lats[i]), float(lons[i]), dest, mode)
+            except Exception as e:                      # noqa: BLE001 - 사유를 보여주려 넓게 잡는다
+                self.last_error.setdefault(mode, str(e)[:160])
+                return i, None
+
+        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as pool:
+            for i, val in pool.map(one, range(len(lats))):
+                if val is not None:
+                    out[i] = val
+
+        return np.clip(np.round(out, 1), 1.0, 600.0)
+
+    def _one_minute(self, la: float, lo: float, dest: Destination, mode: str) -> float | None:
+        from .data_sources import kakao as kakao_api
+
+        if mode == "drive":
+            route = kakao_api.car_directions(la, lo, dest.lat, dest.lon, self.kakao_key)
+            return route.duration_sec / 60.0 if route else None
+
+        if self.kakao_key:
+            route = kakao_api.transit_route(la, lo, dest.lat, dest.lon, self.kakao_key)
+            if route is not None:
+                return route.total_time_sec / 60.0
+            if not self.odsay_key:
+                return None
+
         import requests  # 선택 의존성
 
-        out = []
-        for la, lo in zip(np.asarray(lat), np.asarray(lon)):
-            if mode == "drive" and self.kakao_key:
-                r = requests.get(
-                    "https://apis-navi.kakaomobility.com/v1/directions",
-                    params={"origin": f"{lo},{la}", "destination": f"{dest.lon},{dest.lat}"},
-                    headers={"Authorization": f"KakaoAK {self.kakao_key}"},
-                    timeout=self.timeout)
-                sec = r.json()["routes"][0]["summary"]["duration"]
-            elif mode == "transit" and self.odsay_key:
-                r = requests.get(
-                    "https://api.odsay.com/v1/api/searchPubTransPathT",
-                    params={"apiKey": self.odsay_key, "SX": lo, "SY": la,
-                            "EX": dest.lon, "EY": dest.lat},
-                    timeout=self.timeout)
-                sec = r.json()["result"]["path"][0]["info"]["totalTime"] * 60
-            else:
-                raise RuntimeError("no key for mode")
-            out.append(sec / 60.0)
-        return np.round(np.array(out), 1)
+        r = requests.get(
+            "https://api.odsay.com/v1/api/searchPubTransPathT",
+            params={"apiKey": self.odsay_key, "SX": lo, "SY": la,
+                    "EX": dest.lon, "EY": dest.lat},
+            timeout=self.timeout)
+        return r.json()["result"]["path"][0]["info"]["totalTime"]
 
 
 # --------------------------------------------------------------------------- #
