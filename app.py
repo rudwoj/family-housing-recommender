@@ -45,14 +45,36 @@ try:
 except Exception:
     HAS_ST_FOLIUM = False
 
-PLACE_PRESETS = {
-    "여의도": (37.5216, 126.9243), "강남역": (37.4979, 127.0276),
-    "광화문": (37.5720, 126.9769), "판교": (37.3947, 127.1112),
-    "구로디지털단지": (37.4853, 126.9015), "성수": (37.5446, 127.0559),
-    "대치 학원가": (37.4995, 127.0630), "잠실": (37.5133, 127.1000),
-    "상암DMC": (37.5796, 126.8896), "용산": (37.5298, 126.9648),
-}
 SORT_MODES = ["종합 적합도", "최약자 우선 (Maximin)", "형평성 우선"]
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def search_places(query: str, api_key: str) -> list[dict]:
+    """카카오 키워드 장소 검색. 같은 검색어는 캐시로 재호출을 막는다."""
+    return kakao.search_keyword_places(query, api_key, size=7)
+
+
+def run_place_search(query: str) -> tuple[list[dict], str]:
+    """장소 검색을 실행하고 (결과, 오류 메시지)를 돌려준다."""
+    api_key = read_api_key("KAKAO_REST_API_KEY")
+    if not api_key:
+        return [], ("카카오 API 키가 설정되지 않았습니다. 환경변수 또는 Secrets에 "
+                    "`KAKAO_REST_API_KEY`를 추가해 주세요.")
+    query = query.strip()
+    if len(query) < 2:
+        return [], "검색어를 2글자 이상 입력해 주세요."
+    try:
+        results = search_places(query, api_key)
+    except kakao.KakaoError as e:
+        msg = str(e)
+        if "HTTP 401" in msg or "HTTP 403" in msg:
+            return [], "카카오 API 키가 유효하지 않거나 권한이 없습니다. 키 설정을 확인해 주세요."
+        return [], f"장소 검색에 실패했습니다: {msg[:120]}"
+    except Exception as e:                              # noqa: BLE001 - 네트워크 오류 포함
+        return [], f"네트워크 오류로 장소를 검색하지 못했습니다: {str(e)[:120]}"
+    if not results:
+        return [], f"'{query}' 검색 결과가 없습니다. 다른 이름으로 검색해 보세요."
+    return results, ""
 
 
 @st.cache_data(show_spinner=False)
@@ -177,17 +199,11 @@ def destination_form(mk: str, base_d: Destination,
     weight = c2.slider("중요도", 0.0, 2.0, value=float(base_d.weight), step=0.1,
                        key=f"dw__{mk}__{dk}")
 
-    preset = st.selectbox("위치", ["(좌표 직접 입력)"] + list(PLACE_PRESETS), index=0,
-                          key=f"dplace__{mk}__{dk}")
-    if preset == "(좌표 직접 입력)":
-        c3, c4 = st.columns(2)
-        lat = c3.number_input("위도", value=float(base_d.lat), format="%.4f",
-                              key=f"dlat__{mk}__{dk}")
-        lon = c4.number_input("경도", value=float(base_d.lon), format="%.4f",
-                              key=f"dlon__{mk}__{dk}")
-    else:
-        lat, lon = PLACE_PRESETS[preset]
-        st.caption(f"📍 {preset} ({lat:.4f}, {lon:.4f})")
+    c3, c4 = st.columns(2)
+    lat = c3.number_input("위도", value=float(base_d.lat), format="%.4f",
+                          key=f"dlat__{mk}__{dk}")
+    lon = c4.number_input("경도", value=float(base_d.lon), format="%.4f",
+                          key=f"dlon__{mk}__{dk}")
 
     cap = st.number_input("⛔ 이동시간 상한 (분, 0 = 제한 없음)", min_value=0,
                           value=int(prev_cap), step=5, key=f"dcap__{mk}__{dk}")
@@ -406,7 +422,10 @@ def render_setup() -> None:
     if "members" not in draft:
         draft["members"] = saved.get("members") or make_default_members(
             int(raw.get("n_members", 2)))
+    if "places" not in draft:
+        draft["places"] = dict(raw.get("places", {}))
     members: list[Member] = draft["members"]
+    member_places: dict = draft["places"]
     member_index = min(int(st.session_state.get("member_index", 0)), len(members) - 1)
     st.session_state.member_index = member_index
 
@@ -521,9 +540,48 @@ def render_setup() -> None:
             mode_keys = list(TRAVEL_MODES)
             mode = st.radio("이동 수단", mode_keys, index=mode_keys.index(destination.mode), key=f"wiz_mode_{current.key}", horizontal=True,
                             format_func=lambda x: {"transit":"🚇  대중교통", "drive":"🚗  자동차", "walk":"🚶  도보"}[x])
-            places = list(PLACE_PRESETS)
-            nearest = min(places, key=lambda p: abs(PLACE_PRESETS[p][0]-destination.lat)+abs(PLACE_PRESETS[p][1]-destination.lon))
-            place = st.selectbox("목적지 위치", places, index=places.index(nearest), key=f"wiz_place_{current.key}")
+            selected_place = member_places.get(current.key)
+            if selected_place:
+                st.success(f"**목적지: {selected_place['place_name']}**  \n"
+                           f"주소: {selected_place['address']}  \n선택 완료 ✓")
+                if st.button("다시 검색", key=f"wiz_replace_{current.key}"):
+                    member_places.pop(current.key, None)
+                    st.session_state.pop(f"wiz_results_{current.key}", None)
+                    st.rerun()
+            else:
+                sc1, sc2 = st.columns([3.4, 1])
+                search_query = sc1.text_input(
+                    "목적지 위치 검색", key=f"wiz_query_{current.key}",
+                    placeholder="건물/장소 이름을 입력하세요 (예: 고려대학교)")
+                if sc2.button("🔍 검색", key=f"wiz_search_{current.key}", use_container_width=True):
+                    results, err = run_place_search(search_query)
+                    st.session_state[f"wiz_results_{current.key}"] = {"items": results, "error": err}
+                found = st.session_state.get(f"wiz_results_{current.key}")
+                if found is None:
+                    st.caption("아직 목적지가 선택되지 않았습니다. 장소 이름으로 검색해 주세요.")
+                elif found["error"]:
+                    st.warning(found["error"])
+                else:
+                    for j, p in enumerate(found["items"]):
+                        rc1, rc2 = st.columns([4.2, 1])
+                        addr_lines = [ln for ln in
+                                      (p["road_address_name"],
+                                       f"(지번) {p['address_name']}" if p["address_name"] else "")
+                                      if ln]
+                        rc1.markdown(
+                            f"**{p['place_name']}**<br>"
+                            f"<span style='color:#728197;font-size:14px'>{'<br>'.join(addr_lines)}</span>",
+                            unsafe_allow_html=True)
+                        if rc2.button("선택", key=f"wiz_pick_{current.key}_{j}",
+                                      use_container_width=True):
+                            member_places[current.key] = {
+                                "place_name": p["place_name"],
+                                "address": p["road_address_name"] or p["address_name"],
+                                "latitude": p["latitude"],
+                                "longitude": p["longitude"],
+                            }
+                            st.session_state.pop(f"wiz_results_{current.key}", None)
+                            st.rerun()
             card_count, card_prev, card_next = st.columns([4, .85, .85])
             card_count.markdown(f'<div class="counter">{member_index + 1} / {len(members)}</div>', unsafe_allow_html=True)
             if card_prev.button("이전", key="previous_member", disabled=member_index == 0, use_container_width=True):
@@ -534,7 +592,11 @@ def render_setup() -> None:
 
         def _save_member():
             old = members[member_index]
-            lat, lon = PLACE_PRESETS[place]
+            sel = member_places.get(old.key)
+            if sel:
+                lat, lon = float(sel["latitude"]), float(sel["longitude"])
+            else:
+                lat, lon = destination.lat, destination.lon
             updated_destination = Destination(destination.key, destination_label.strip() or destination.label,
                                               lat, lon, mode, destination.weight, True)
             members[member_index] = Member(old.key, name.strip() or old.name, old.color,
@@ -606,6 +668,11 @@ def render_setup() -> None:
     if step == 1 and onward:
         save_current_member()
         draft["n_members"] = len(members)
+        missing = [m.name for m in members if m.key not in member_places]
+        if missing:
+            st.error("목적지를 아직 선택하지 않은 구성원이 있습니다: "
+                     + ", ".join(missing) + " — 장소를 검색해 선택해 주세요.")
+            onward = False
     elif step == 2 and (onward or back):
         draft.update(c_rooms=c_rooms, c_area=c_area, lock_rooms=lock_rooms, lock_area=lock_area,
                      c_park=c_park, c_walk=c_walk, c_age=c_age, c_noise=c_noise,
@@ -797,9 +864,9 @@ def render_result(conf: dict) -> None:
             # components.html(=about:srcdoc) 이 아니라 커스텀 컴포넌트로 띄운다.
             # srcdoc 문서에서는 카카오 SDK 가 location.protocol 을 "about:" 으로
             # 읽어 2단계 스크립트를 http 로 요청하고, mixed content 로 막힌다.
-            viz_kakao.render_kakao_map(top, active, map_sel, routes,
-                                       settings.kakao_javascript_key,
-                                       height=560, key="kakao_map")
+            viz_kakao.render_map_view(top, active, map_sel, routes,
+                                      settings.kakao_javascript_key,
+                                      height=560, key="kakao_map")
         else:
             kind, obj = viz.build_map(top, active, map_sel, routes=routes)
             if kind == "folium" and HAS_ST_FOLIUM:
