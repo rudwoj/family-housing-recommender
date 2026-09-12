@@ -22,7 +22,8 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.schema import DEFAULT_MEMBERS, ORIENTATION_SCORE, assert_no_price_columns  # noqa: E402
+from src.schema import (DEFAULT_MEMBER_COUNT, ORIENTATION_SCORE,  # noqa: E402
+                        assert_no_price_columns, make_default_members)
 from src.travel import EstimatedTravelProvider, travel_matrix  # noqa: E402
 
 DATA_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -107,11 +108,12 @@ def main():
     ap.add_argument("--missing-rate", type=float, default=0.04)
     ap.add_argument("--outlier-rate", type=float, default=0.015,
                     help="초대형 이상치 비율 (클리핑/RobustScaler 검증용)")
+    ap.add_argument("--members", type=int, default=DEFAULT_MEMBER_COUNT)
     ap.add_argument("--out", default=DATA_DIR)
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    members = DEFAULT_MEMBERS
+    members = make_default_members(args.members)
 
     listings = generate_listings(args.n, rng, args.outlier_rate)
     travel = travel_matrix(listings, members, EstimatedTravelProvider(seed=args.seed),

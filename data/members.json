@@ -1,14 +1,14 @@
 [
   {
-    "key": "dad",
-    "name": "아빠",
+    "key": "m1",
+    "name": "구성원 1",
     "color": "#2563eb",
     "priority": 1.0,
     "min_satisfaction": 0.0,
     "destinations": [
       {
-        "key": "work",
-        "label": "여의도 직장",
+        "key": "dest1",
+        "label": "직장",
         "lat": 37.5216,
         "lon": 126.9243,
         "mode": "transit",
@@ -16,26 +16,26 @@
         "enabled": true
       },
       {
-        "key": "gym",
-        "label": "운동 시설",
-        "lat": 37.53,
-        "lon": 126.93,
-        "mode": "walk",
-        "weight": 0.4,
+        "key": "dest2",
+        "label": "보조 목적지",
+        "lat": 37.51,
+        "lon": 127.02,
+        "mode": "drive",
+        "weight": 0.5,
         "enabled": false
       }
     ]
   },
   {
-    "key": "mom",
-    "name": "엄마",
+    "key": "m2",
+    "name": "구성원 2",
     "color": "#db2777",
     "priority": 1.0,
     "min_satisfaction": 0.0,
     "destinations": [
       {
-        "key": "work",
-        "label": "강남 직장",
+        "key": "dest1",
+        "label": "직장",
         "lat": 37.4979,
         "lon": 127.0276,
         "mode": "drive",
@@ -43,25 +43,25 @@
         "enabled": true
       },
       {
-        "key": "mart",
-        "label": "대형마트",
+        "key": "dest2",
+        "label": "보조 목적지",
         "lat": 37.51,
         "lon": 127.02,
         "mode": "drive",
         "weight": 0.5,
-        "enabled": true
+        "enabled": false
       }
     ]
   },
   {
-    "key": "child",
-    "name": "자녀",
+    "key": "m3",
+    "name": "구성원 3",
     "color": "#059669",
     "priority": 1.0,
     "min_satisfaction": 0.0,
     "destinations": [
       {
-        "key": "school",
+        "key": "dest1",
         "label": "학교",
         "lat": 37.505,
         "lon": 127.045,
@@ -70,13 +70,40 @@
         "enabled": true
       },
       {
-        "key": "academy",
-        "label": "대치 학원가",
+        "key": "dest2",
+        "label": "보조 목적지",
+        "lat": 37.51,
+        "lon": 127.02,
+        "mode": "drive",
+        "weight": 0.5,
+        "enabled": false
+      }
+    ]
+  },
+  {
+    "key": "m4",
+    "name": "구성원 4",
+    "color": "#d97706",
+    "priority": 1.0,
+    "min_satisfaction": 0.0,
+    "destinations": [
+      {
+        "key": "dest1",
+        "label": "학원",
         "lat": 37.4995,
         "lon": 127.063,
         "mode": "transit",
-        "weight": 0.8,
+        "weight": 1.0,
         "enabled": true
+      },
+      {
+        "key": "dest2",
+        "label": "보조 목적지",
+        "lat": 37.51,
+        "lon": 127.02,
+        "mode": "drive",
+        "weight": 0.5,
+        "enabled": false
       }
     ]
   }
