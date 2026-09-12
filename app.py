@@ -39,6 +39,12 @@ DATA = os.path.join(BASE, "data")
 st.set_page_config(page_title="가족 맞춤 주거지 추천", page_icon="🏡", layout="wide",
                    initial_sidebar_state="collapsed")
 
+try:
+    from streamlit_folium import st_folium
+    HAS_ST_FOLIUM = True
+except Exception:
+    HAS_ST_FOLIUM = False
+
 PLACE_PRESETS = {
     "여의도": (37.5216, 126.9243), "강남역": (37.4979, 127.0276),
     "광화문": (37.5720, 126.9769), "판교": (37.3947, 127.1112),
@@ -84,7 +90,7 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
             return {"path": [], "status": "walk",
                     "reason": "TMAP_APP_KEY 가 없어 직선으로 표시합니다"}
         try:
-            route = tmap.pedestrian_route(lat, lon, dest_lat, dest_lon, tmap_key, timeout=15)
+            route = tmap.pedestrian_route(lat, lon, dest_lat, dest_lon, tmap_key)
             if route is not None and len(route.path) >= 2:
                 return {"path": route.path, "status": "real", "reason": "TMap",
                         "minutes": route.total_time_sec / 60.0}
@@ -96,7 +102,7 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
     if mode == "transit" and odsay_key:
         # 대중교통은 ODsay 를 먼저 쓴다 (카카오 대중교통은 응답이 커서 느리다).
         try:
-            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key, timeout=15)
+            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key)
             if route is not None and len(route.path) >= 2:
                 return {"path": route.path, "status": "real", "reason": "ODsay",
                         "minutes": route.total_time_sec / 60.0}
@@ -108,9 +114,9 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
         return {"path": [], "status": "no_key", "reason": "카카오 키 없음"}
     try:
         if mode == "drive":
-            route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key, timeout=15)
+            route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key)
         else:
-            route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key, timeout=15)
+            route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key)
         if route is not None and len(route.path) >= 2:
             secs = getattr(route, "duration_sec", None) or getattr(route, "total_time_sec", None)
             return {"path": route.path, "status": "real", "reason": "",
@@ -188,7 +194,7 @@ def destination_form(mk: str, base_d: Destination,
     return Destination(dk, label, lat, lon, mode, weight, enabled), int(cap)
 
 
-def render_setup() -> None:
+def render_setup_legacy() -> None:
     """
     설정 화면. 이전에 [확인하기] 로 저장한 값이 있으면 그 값으로 복원한다.
     (결과 화면을 거치는 동안 설정 위젯의 상태가 정리될 수 있어, 위젯 상태가 아니라
@@ -388,6 +394,268 @@ def render_setup() -> None:
 
 
 # =========================================================================== #
+# MOVA-style 4-step setup wizard
+# =========================================================================== #
+def render_setup() -> None:
+    """Collect the same model inputs in a calm, reference-matched wizard."""
+    saved = st.session_state.get("config", {})
+    raw = saved.get("raw", {})
+    draft = st.session_state.setdefault("setup_draft", {})
+    step = int(st.session_state.setdefault("setup_step", 1))
+
+    def val(key, fallback):
+        return draft.get(key, raw.get(key, fallback))
+
+    if "members" not in draft:
+        draft["members"] = saved.get("members") or make_default_members(
+            int(raw.get("n_members", 2)))
+    members: list[Member] = draft["members"]
+    member_index = min(int(st.session_state.get("member_index", 0)), len(members) - 1)
+    st.session_state.member_index = member_index
+
+    intro = {
+        1: ("함께 찾는 새로운 동네", "누구와 함께\n이동하나요?",
+            "함께 이동할 구성원과 선호 조건을 알려주세요.\n모두가 만족할 장소를 더 정확하게 추천해 드려요."),
+        2: ("우리 가족의 기준", "어떤 집을\n찾고 있나요?",
+            "절대 포기할 수 없는 주거 조건을 선택해 주세요.\n후보가 적으면 중요도에 따라 안전하게 조정해요."),
+        3: ("모두의 선호 반영", "무엇을 더\n중요하게 볼까요?",
+            "집의 조건과 이동 시간 사이의 비중을 조절해 주세요.\n구성원별 중요도도 함께 반영할 수 있어요."),
+        4: ("마지막 확인", "추천 방식을\n선택해 주세요",
+            "계산 방식과 결과 개수를 확인하면 준비가 끝나요.\n입력 정보는 추천을 위해서만 안전하게 사용됩니다."),
+    }
+    badge, title, description = intro[step]
+    progress = (33, 55, 78, 100)[step - 1]
+
+    st.markdown(f"""
+    <style>
+      #MainMenu, header[data-testid="stHeader"], footer {{display:none!important}}
+      .stApp {{background:#f7f9fc;color:#111827}}
+      .block-container {{max-width:1540px;padding:0 42px 145px!important}}
+      .mova-header {{height:112px;margin:0 -42px 72px;padding:0 42px;
+        border-bottom:1px solid #26302d;display:flex;align-items:center;justify-content:space-between}}
+      .mova-brand {{display:flex;align-items:center;gap:13px;font-size:22px;font-weight:850;color:#eef2ef}}
+      .mova-logo {{width:46px;height:46px;border-radius:16px;background:#69e6ae;color:#123d32;
+        display:grid;place-items:center;font-size:25px}}
+      .mova-status {{display:flex;align-items:center;gap:21px;color:#99a29f;font-size:18px;font-weight:650}}
+      .mova-status b {{color:#63dfa9;font-size:16px}} .track {{width:180px;height:7px;background:#293330;border-radius:99px;overflow:hidden}}
+      .track i {{display:block;width:{progress}%;height:100%;background:#66e7b0;border-radius:99px}}
+      .intro .badge {{display:inline-block;background:#edf4ff;color:#2563eb;border-radius:999px;padding:9px 16px;font-weight:800;font-size:16px}}
+      .intro h1 {{white-space:pre-line;font-size:48px;line-height:1.16;letter-spacing:-2.8px;margin:28px 0;color:#0f172a}}
+      .intro p {{white-space:pre-line;color:#728197;font-size:19px;line-height:1.75;letter-spacing:-.5px;margin:0 0 42px}}
+      .member-label {{color:#65748a;font-weight:800;font-size:14px;margin-bottom:12px}}
+      .member-tabs-pin {{display:none}}
+      div[data-testid="stElementContainer"]:has(.member-tabs-pin) {{display:none!important}}
+      div[data-testid="stElementContainer"]:has(.member-tabs-pin) + div[data-testid="stHorizontalBlock"] {{gap:6px;background:#f1f3f6;border-radius:18px;padding:6px}}
+      div[data-testid="stElementContainer"]:has(.member-tabs-pin) + div[data-testid="stHorizontalBlock"] .stButton button {{height:52px;border-radius:13px;background:#fff}}
+      div[data-testid="stElementContainer"]:has(.member-tabs-pin) + div[data-testid="stHorizontalBlock"] .stButton button[kind="primary"] {{background:#2867e8;color:#fff}}
+      .privacy {{border:1px solid #dbe4ef;border-radius:18px;padding:20px 22px;color:#718198;font-size:16px;line-height:1.55;margin-top:34px}}
+      div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {{background:#fff;border:1px solid #dbe4ef!important;border-radius:28px!important;
+        box-shadow:0 24px 55px rgba(30,53,74,.10);padding:22px 30px 26px}}
+      .card-head {{display:flex;align-items:center;gap:16px;margin:2px 0 28px}}
+      .step-dot {{width:50px;height:50px;border-radius:50%;background:#2867e8;color:#fff;display:grid;place-items:center;font-size:19px;font-weight:800;flex:none}}
+      .card-head h2 {{margin:0;color:#101827;font-size:28px;letter-spacing:-1px}} .card-head p {{margin:3px 0 0;color:#8190a5;font-size:16px}}
+      .required {{margin-left:auto;border:1px solid #b8d6ff;color:#2870ee;background:#f4f8ff;border-radius:999px;padding:8px 14px;font-weight:800}}
+      div[data-testid="stTextInputRootElement"], div[data-baseweb="base-input"] {{height:64px!important;min-height:64px!important}}
+      .stTextInput input, .stNumberInput input {{height:64px!important;min-height:64px!important;border:1px solid #d9e2ed;border-radius:17px;color:#152033;font-size:17px;padding:0 20px;background:#fff}}
+      div[data-baseweb="select"]>div {{min-height:64px;border-color:#d9e2ed!important;border-radius:17px!important;font-size:17px;background:#fff}}
+      div[role="radiogroup"] {{gap:13px}} div[role="radiogroup"] label {{border:1px solid #d9e2ed;border-radius:17px;padding:17px 22px;min-height:62px;flex:1;justify-content:center}}
+      div[role="radiogroup"] label:has(input:checked) {{background:#2867e8;color:white;border-color:#2867e8}}
+      div[role="radiogroup"] label:has(input:checked) p {{color:white!important}}
+      .stButton button {{height:57px;border-radius:16px;font-weight:800;font-size:17px;border-color:#d6e0ec}}
+      .stButton button[kind="primary"] {{background:#2867e8;border-color:#2867e8}}
+      .counter {{color:#728197;font-size:17px;padding-top:16px}}
+      .footer-pin {{display:none}}
+      div[data-testid="stElementContainer"]:has(.footer-pin) {{display:none!important}}
+      div[data-testid="stElementContainer"]:has(.footer-pin) + div[data-testid="stHorizontalBlock"] {{position:fixed;z-index:999;left:0;right:0;bottom:0;background:#f7f9fc;
+        border-top:1px solid #26302d;padding:25px max(42px,calc((100vw - 1540px)/2 + 42px));box-shadow:0 -8px 24px rgba(30,53,74,.03)}}
+      div[data-testid="stElementContainer"]:has(.footer-pin) + div[data-testid="stHorizontalBlock"] .stButton button[kind="primary"] {{background:#69e6ae;border-color:#69e6ae;color:#102d25}}
+      @media(max-height:950px) and (min-width:801px) {{
+        .block-container {{padding-bottom:105px!important}}
+        .mova-header {{height:88px;margin-bottom:38px}}
+        .intro h1 {{font-size:42px;margin:22px 0}}
+        .intro p {{font-size:17px;line-height:1.65;margin-bottom:28px}}
+        .privacy {{margin-top:20px;padding:16px 18px;font-size:14px}}
+        div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlockBorderWrapper"] {{padding:16px 24px 18px}}
+        .card-head {{margin-bottom:18px}} .card-head h2 {{font-size:26px}}
+        .step-dot {{width:46px;height:46px}}
+        div[data-testid="stTextInputRootElement"], div[data-baseweb="base-input"],
+        .stTextInput input, .stNumberInput input {{height:54px!important;min-height:54px!important}}
+        div[data-baseweb="select"]>div {{min-height:54px}}
+        div[role="radiogroup"] label {{min-height:54px;padding:13px 18px}}
+        div[data-testid="stElementContainer"]:has(.footer-pin) + div[data-testid="stHorizontalBlock"] {{padding-top:16px;padding-bottom:16px}}
+      }}
+      @media(max-width:800px) {{.block-container{{padding:0 20px 130px!important}}.mova-header{{height:88px;margin-bottom:35px;padding:0 20px}}
+        .mova-status span{{display:none}}.track{{width:88px}}.intro h1{{font-size:38px}}}}
+    </style>
+    <div class="mova-header"><div class="mova-brand"><span class="mova-logo">⌖</span>MOVA</div>
+      <div class="mova-status"><b>STEP {step:02d}</b><span>|</span><span>{progress}% prepared</span><div class="track"><i></i></div></div>
+    </div>""", unsafe_allow_html=True)
+
+    left, right = st.columns([.86, 1.55], gap="large")
+    with left:
+        st.markdown(f'<section class="intro"><span class="badge">{badge}</span><h1>{title}</h1><p>{description}</p></section>', unsafe_allow_html=True)
+
+    save_current_member = None
+    if step == 1:
+        pending_index = None
+        with left:
+            st.markdown('<div class="member-label">MEMBERS</div>', unsafe_allow_html=True)
+            st.markdown('<div class="member-tabs-pin"></div>', unsafe_allow_html=True)
+            tabs = st.columns([1] * len(members) + [.34])
+            for i, member in enumerate(members):
+                if tabs[i].button(("• " if i == member_index else "") + member.name,
+                                  key=f"member_tab_{i}", use_container_width=True,
+                                  type="primary" if i == member_index else "secondary"):
+                    pending_index = i
+            if tabs[-1].button("＋", key="add_member", use_container_width=True):
+                if len(members) < MAX_MEMBERS:
+                    members.append(make_default_members(len(members) + 1)[-1])
+                    pending_index = len(members) - 1
+            st.markdown('<div class="privacy">🛡️ &nbsp; 입력한 위치 정보는 추천을 위해서만 안전하게 사용됩니다.</div>', unsafe_allow_html=True)
+
+        current = members[member_index]
+        destination = current.destinations[0]
+        with right.container(border=True):
+            st.markdown(f'<div class="card-head"><div class="step-dot">{member_index + 1}</div><div><h2>{current.name} 정보</h2><p>기본 이동 조건을 입력해 주세요</p></div><span class="required">필수 항목</span></div>', unsafe_allow_html=True)
+            a, b = st.columns(2)
+            name = a.text_input("구성원 이름", value=current.name, key=f"wiz_name_{current.key}", placeholder="이름을 입력하세요")
+            destination_label = b.text_input("목적지", value=destination.label, key=f"wiz_dest_{current.key}", placeholder="장소 또는 주소 검색")
+            st.markdown("<br>", unsafe_allow_html=True)
+            mode_keys = list(TRAVEL_MODES)
+            mode = st.radio("이동 수단", mode_keys, index=mode_keys.index(destination.mode), key=f"wiz_mode_{current.key}", horizontal=True,
+                            format_func=lambda x: {"transit":"🚇  대중교통", "drive":"🚗  자동차", "walk":"🚶  도보"}[x])
+            places = list(PLACE_PRESETS)
+            nearest = min(places, key=lambda p: abs(PLACE_PRESETS[p][0]-destination.lat)+abs(PLACE_PRESETS[p][1]-destination.lon))
+            place = st.selectbox("목적지 위치", places, index=places.index(nearest), key=f"wiz_place_{current.key}")
+            card_count, card_prev, card_next = st.columns([4, .85, .85])
+            card_count.markdown(f'<div class="counter">{member_index + 1} / {len(members)}</div>', unsafe_allow_html=True)
+            if card_prev.button("이전", key="previous_member", disabled=member_index == 0, use_container_width=True):
+                pending_index = member_index - 1
+            if card_next.button("다음", key="next_member", disabled=member_index == len(members) - 1,
+                                type="primary", use_container_width=True):
+                pending_index = member_index + 1
+
+        def _save_member():
+            old = members[member_index]
+            lat, lon = PLACE_PRESETS[place]
+            updated_destination = Destination(destination.key, destination_label.strip() or destination.label,
+                                              lat, lon, mode, destination.weight, True)
+            members[member_index] = Member(old.key, name.strip() or old.name, old.color,
+                                           [updated_destination] + old.destinations[1:], old.priority,
+                                           old.min_satisfaction, old.active)
+            draft["members"] = members
+        save_current_member = _save_member
+        if pending_index is not None and pending_index != member_index:
+            _save_member()
+            st.session_state.member_index = pending_index
+            st.rerun()
+
+    elif step == 2:
+        with right.container(border=True):
+            st.markdown('<div class="card-head"><div class="step-dot">2</div><div><h2>필수 주거 조건</h2><p>타협할 수 없는 기준을 선택해 주세요</p></div><span class="required">필수 항목</span></div>', unsafe_allow_html=True)
+            a, b = st.columns(2)
+            c_rooms = a.slider("최소 방 개수", 1, 7, int(val("c_rooms", 3)))
+            c_area = b.slider("최소 전용면적 (m²)", 29, 200, int(val("c_area", 60)))
+            lock_rooms = a.checkbox("방 개수는 절대 사수", value=bool(val("lock_rooms", True)))
+            lock_area = b.checkbox("면적은 절대 사수", value=bool(val("lock_area", False)))
+            a, b = st.columns(2)
+            c_park = a.slider("최소 주차 가능 대수", 0.0, 3.0, float(val("c_park", .5)), .05)
+            c_walk = b.slider("역까지 도보 상한 (분)", 1, 45, int(val("c_walk", 20)))
+            a, b = st.columns(2)
+            c_age = a.slider("최대 준공 경과년수", 0, 46, int(val("c_age", 30)))
+            c_noise = b.slider("최대 주간 소음도 (dB)", 33, 74, int(val("c_noise", 74)))
+            allowed_gu = st.multiselect("지역 한정 (미선택 시 전체)", sorted(listings["gu"].unique()), default=val("allowed_gu", []))
+            allowed_or = st.multiselect("허용할 향", list(ORIENTATION_SCORE), default=val("allowed_or", list(ORIENTATION_SCORE)))
+
+    elif step == 3:
+        with right.container(border=True):
+            st.markdown('<div class="card-head"><div class="step-dot">3</div><div><h2>선호 중요도</h2><p>추천에 반영할 비중을 조정해 주세요</p></div></div>', unsafe_allow_html=True)
+            alpha = st.slider("🏠 집 자체  ← 중요도 →  이동 시간 🚶", 0.0, 1.0, float(val("alpha", .5)), .05)
+            st.caption(f"주택 조건 {alpha:.0%}  ·  이동 시간 {1-alpha:.0%}")
+            weights = {}
+            weight_cols = st.columns(2)
+            saved_weights = draft.get("common_weights", saved.get("common_weights", {}))
+            for i, feature in enumerate(COMMON_FEATURES):
+                weights[feature.key] = weight_cols[i % 2].slider(feature.axis, 0.0, 2.0,
+                    float(saved_weights.get(feature.key, feature.default_weight)), .1, key=f"wizard_weight_{feature.key}")
+            priorities, floors = {}, {}
+            st.markdown("#### 구성원별 중요도")
+            member_cols = st.columns(2)
+            for i, member in enumerate(members):
+                priorities[member.key] = member_cols[i % 2].slider(f"{member.name} 발언권", 0.0, 3.0, float(member.priority), .1, key=f"priority_{member.key}")
+                floors[member.key] = member_cols[i % 2].slider(f"{member.name} 최소 만족도", 0, 90, int(member.min_satisfaction), 5, key=f"floor_{member.key}")
+
+    else:
+        with right.container(border=True):
+            st.markdown('<div class="card-head"><div class="step-dot">4</div><div><h2>추천 설정</h2><p>결과 방식을 확인하면 준비가 완료됩니다</p></div></div>', unsafe_allow_html=True)
+            a, b = st.columns(2)
+            k = a.slider("추천 매물 수", 3, 30, int(val("k", 10)))
+            min_candidates = b.slider("최소 확보 후보", 1, 30, int(val("min_candidates", 5)))
+            sort_mode = st.radio("정렬 기준", SORT_MODES, index=SORT_MODES.index(val("sort_mode", SORT_MODES[0])), horizontal=True)
+            use_api = st.toggle("실제 경로 API 사용", value=bool(val("use_api", False)), help="키가 없거나 조회에 실패하면 거리 기반 추정치로 자동 전환됩니다.")
+            scaler_kind = st.selectbox("계산 스케일러", ["robust", "minmax", "standard"], index=["robust", "minmax", "standard"].index(val("scaler", "robust")), format_func=lambda x: {"robust":"RobustScaler (권장)","minmax":"MinMax","standard":"Standard"}[x])
+            clip_q = st.slider("이상치 클리핑 (%)", 0.0, 5.0, float(val("clip_q", .01))*100, .5) / 100
+            st.caption(f"현재 {'최신 공공' if st.session_state.listing_source == 'public' else '내장'} 후보 {len(listings)}건을 사용합니다.")
+
+    st.markdown('<div class="footer-pin"></div>', unsafe_allow_html=True)
+    counter, spacer, prev_col, next_col = st.columns([1, 5, 1, 1.25])
+    counter.markdown(f"**{step}** &nbsp; / &nbsp; 4")
+    back = prev_col.button("←  이전", disabled=step == 1, use_container_width=True)
+    onward = next_col.button("맞춤 추천 보기  →" if step == 4 else "다음  →", type="primary", use_container_width=True)
+
+    if step == 1 and onward:
+        save_current_member()
+        draft["n_members"] = len(members)
+    elif step == 2 and (onward or back):
+        draft.update(c_rooms=c_rooms, c_area=c_area, lock_rooms=lock_rooms, lock_area=lock_area,
+                     c_park=c_park, c_walk=c_walk, c_age=c_age, c_noise=c_noise,
+                     allowed_gu=allowed_gu, allowed_or=allowed_or)
+    elif step == 3 and (onward or back):
+        draft.update(alpha=alpha, common_weights=weights)
+        for member in members:
+            member.priority = priorities[member.key]
+            member.min_satisfaction = float(floors[member.key])
+    elif step == 4 and (onward or back):
+        draft.update(k=k, min_candidates=min_candidates, sort_mode=sort_mode, use_api=use_api,
+                     scaler=scaler_kind, clip_q=clip_q)
+
+    if back:
+        st.session_state.setup_step = step - 1
+        st.rerun()
+    if onward and step < 4:
+        st.session_state.setup_step = step + 1
+        st.rerun()
+    if onward and step == 4:
+        constraints = [
+            Constraint("rooms", "min", val("c_rooms", 3), priority=0, locked=val("lock_rooms", True), label="방 개수"),
+            Constraint("area_m2", "min", val("c_area", 60), priority=1, locked=val("lock_area", False), label="전용면적"),
+            Constraint("parking_slots", "min", val("c_park", .5), priority=2, label="주차 가능 대수"),
+            Constraint("transit_walk_min", "max", val("c_walk", 20), priority=2, label="역까지 도보"),
+            Constraint("building_age", "max", val("c_age", 30), priority=3, label="준공 경과년수"),
+        ]
+        if val("c_noise", 74) < 74:
+            constraints.append(Constraint("noise_db", "max", val("c_noise", 74), priority=3, label="소음도"))
+        categories = []
+        orientations = val("allowed_or", list(ORIENTATION_SCORE))
+        if len(orientations) < len(ORIENTATION_SCORE):
+            categories.append(CategoryConstraint("orientation", orientations, priority=2, label="향"))
+        if val("allowed_gu", []):
+            categories.append(CategoryConstraint("gu", val("allowed_gu", []), priority=1, label="지역"))
+        common_weights = draft.get("common_weights", {f.key: f.default_weight for f in COMMON_FEATURES})
+        satisficing = {d.column(m.key): 25.0 for m in members for d in m.enabled_destinations}
+        st.session_state.config = {
+            "members": members, "constraints": constraints, "categories": categories,
+            "min_candidates": int(val("min_candidates", 5)), "alpha": float(val("alpha", .5)),
+            "common_weights": common_weights, "satisficing": satisficing,
+            "scaler": val("scaler", "robust"), "clip_q": float(val("clip_q", .01)),
+            "k": int(val("k", 10)), "sort_mode": val("sort_mode", SORT_MODES[0]),
+            "use_api": bool(val("use_api", False)), "raw": dict(draft),
+        }
+        st.session_state.stage = "result"
+        st.rerun()
+
+
+# =========================================================================== #
 # ③ 결과 화면
 # =========================================================================== #
 def render_result(conf: dict) -> None:
@@ -407,13 +675,17 @@ def render_result(conf: dict) -> None:
     hc = HardConstraints(numeric=conf["constraints"], category=conf["categories"],
                          min_candidates=conf["min_candidates"])
 
+    bar = st.columns([1, 4])
+    if bar[0].button("⬅ 설정 수정", use_container_width=True):
+        st.session_state.stage = "setup"
+        st.rerun()
+
+    if not engine.active_members and conf["alpha"] < 1.0:
+        st.warning("활성 구성원이 없어 공통(주택 조건) 피처만으로 계산합니다.")
+
     try:
         rec = engine.recommend(cfg, hc, k=conf["k"])
     except ValueError as e:
-        # 지도(전체 화면)를 못 그리는 경로이므로 여기서는 일반 화면으로 안내한다.
-        if st.button("⬅ 설정 수정"):
-            st.session_state.stage = "setup"
-            st.rerun()
         st.error(f"⚠️ {e}")
         st.stop()
 
@@ -427,71 +699,9 @@ def render_result(conf: dict) -> None:
 
     top, d, active = rec.top, rec.diagnostics, engine.active_members
 
-    # ---------------- 전체 화면 지도 (카카오맵 스타일) ---------------- #
-    # 헤더를 숨기고 지도 iframe 을 뷰포트 전체에 고정한다. 진단·상세 정보는
-    # 지도 왼쪽 아래 [상세 정보 보기] 버튼 → 다이얼로그로 제공한다.
-    st.markdown("""
-        <style>
-        header[data-testid="stHeader"] { display: none; }
-        .block-container { padding: 0 !important; max-width: 100% !important; }
-        section[data-testid="stMain"] { overflow: hidden; }
-        iframe[title$="kakao_map"] { position: fixed; inset: 0; z-index: 10;
-                                     width: 100vw !important;
-                                     height: 100vh !important; border: 0; }
-        /* 리런 중 stale 요소가 0.33 으로 어두워지는 것을 완화 — 지도가 거의
-           그대로 보이고, 로딩 표시는 지도 컴포넌트가 중앙에 직접 띄운다. */
-        [data-stale="true"], .stale-element { opacity: 0.9 !important; }
-        </style>""", unsafe_allow_html=True)
+    st.title("🏡 추천 결과")
+    st.caption("Multi-Person Weighted K-NN · 가격 배제 · 이동은 모두 시간(분)")
 
-    # 선택 상태: 컴포넌트가 돌려준 클릭 값 → session_state → 기본 1위
-    map_sel = st.session_state.get("map_sel")
-    if map_sel not in top.index:
-        map_sel = top.index[0]
-    r_sel = top.loc[map_sel]
-
-    routes: dict[tuple[str, str], dict] = {}
-    settings = load_settings()
-    odsay_key = read_api_key("ODSAY_API_KEY")
-    tmap_key = read_api_key("TMAP_APP_KEY")
-    # 지도 동선은 "선택한 매물 1건" 에 대해서만 조회하므로 호출이 몇 건뿐이다.
-    # 전체 매물 × 목적지를 도는 이동시간 계산(경로 API 토글)과 달리 항상
-    # 실제 경로를 가져온다 — 토글이 꺼져 있다고 대중교통까지 직선으로 그리면
-    # 지나는 역을 하나도 안 보여주게 된다.
-    if settings.has_kakao_key or odsay_key or tmap_key:
-        with st.spinner("실제 동선 조회 중..."):
-            for m in active:
-                for dst in m.enabled_destinations:
-                    routes[(m.key, dst.key)] = fetch_real_route(
-                        float(r_sel["lat"]), float(r_sel["lon"]),
-                        float(dst.lat), float(dst.lon), dst.mode,
-                        settings.kakao_rest_api_key, odsay_key, tmap_key)
-
-    # 카카오 JS 키가 있으면 카카오맵, 없으면 Leaflet(OSM) — 오버레이 UI 는 동일.
-    js_key = settings.kakao_javascript_key if settings.has_kakao_js_key else ""
-    act = viz_kakao.render_map_view(top, active, map_sel, routes, js_key,
-                                    height=640, key="map_view")
-    # 컴포넌트 값은 세션 동안 유지되므로, nonce(n)가 바뀐 새 이벤트만 처리한다.
-    if isinstance(act, dict) and act.get("n") != st.session_state.get("map_view_n"):
-        st.session_state["map_view_n"] = act.get("n")
-        kind, aid = act.get("action"), act.get("id")
-        if kind == "back":
-            st.session_state.stage = "setup"
-            st.rerun()
-        elif kind == "select" and aid in top.index and aid != map_sel:
-            st.session_state["map_sel"] = aid
-            st.rerun()
-        elif kind == "detail":
-            detail_dialog(rec, top, active, d, conf, map_sel, js_key)
-
-
-# =========================================================================== #
-# 상세 분석 다이얼로그 — 지도 왼쪽 아래 [상세 정보 보기] 로 연다
-# =========================================================================== #
-@st.dialog("📊 상세 분석", width="large")
-def detail_dialog(rec, top, active, d, conf, map_sel: str, js_key: str) -> None:
-    # 진단 메시지 (전체 화면 지도에서는 자리가 없어 여기서 보여준다)
-    if not active and conf["alpha"] < 1.0:
-        st.warning("활성 구성원이 없어 공통(주택 조건) 피처만으로 계산했습니다.")
     if len(d["relaxations"]):
         st.warning(f"⚙️ 하드 제약이 과도해 후보가 {conf['min_candidates']}건 미만이었습니다. "
                    f"덜 중요한 제약부터 **{len(d['relaxations'])}단계 자동 완화**해 "
@@ -506,56 +716,148 @@ def detail_dialog(rec, top, active, d, conf, map_sel: str, js_key: str) -> None:
                 " → 클리핑 비율을 올리거나 RobustScaler 를 쓰세요.")
 
     best = top.iloc[0]
-    st.caption(f"후보 {d['candidates']}건 / 전체 {d['total_listings']}건 · "
-               f"1위 적합도 {best['fit_score']:.1f}점 · 최약자 {best['sat_min']:.1f}점")
+    c = st.columns(3)
+    c[0].metric("후보 매물", f"{d['candidates']}건", f"전체 {d['total_listings']}건 중")
+    c[1].metric("1위 종합 적합도", f"{best['fit_score']:.1f}점")
+    c[2].metric("최약자 만족도", f"{best['sat_min']:.1f}점")
 
-    # 선택 매물 요약 한 줄
-    r_sel = top.loc[map_sel]
-    parts = [f"{m.name} {r_sel[f'burden_min__{m.key}']:.0f}분" for m in active
-             if f"burden_min__{m.key}" in r_sel and pd.notna(r_sel[f"burden_min__{m.key}"])]
-    st.info(f"**{r_sel['name']}** · {r_sel['gu']} — 전용 {r_sel['area_m2']:.0f}m² / "
-            f"방 {int(r_sel['rooms'])} / 주차 {r_sel['parking_slots']:.2f}대 / "
-            f"{r_sel['orientation']}향 / 역도보 {r_sel['transit_walk_min']:.0f}분"
-            + ("  ·  " + " · ".join(parts) if parts else ""))
-
-    main_cols = {"rank": "순위", "name": "매물", "gu": "지역", "fit_score": "종합",
-                 "sat__공통": "주거", **{f"sat__{m.key}": m.name for m in active},
-                 "sat_min": "최약자", "sat_gap": "격차", "area_m2": "면적(m²)",
-                 "rooms": "방", "parking_slots": "주차", "orientation": "향"}
-    detail_cols = {"name": "매물", "transit_walk_min": "역도보(분)",
-                   **{f"burden_min__{m.key}": f"{m.name} 이동(분)" for m in active},
-                   "travel_mean_min": "평균이동(분)", "travel_std_min": "편차(분)",
-                   "equity_index": "형평성", "green_ratio": "녹지(%)",
-                   "building_age": "연식(년)", "daylight_hours": "일조(h)",
-                   "noise_db": "소음(dB)"}
-    st.dataframe(top[[c_ for c_ in main_cols if c_ in top.columns]].rename(columns=main_cols),
-                 use_container_width=True, height=380,
-                 column_config={
-                     "종합": st.column_config.ProgressColumn("종합", min_value=0,
-                                                           max_value=100, format="%.1f"),
-                     "최약자": st.column_config.ProgressColumn("최약자", min_value=0,
-                                                            max_value=100, format="%.1f")})
-    with st.expander("이동 시간과 주거 환경", expanded=False):
-        st.dataframe(
-            top[[c_ for c_ in detail_cols if c_ in top.columns]].rename(columns=detail_cols),
-            use_container_width=True, height=380)
-
-    st.divider()
-    # 지도에서 선택한 매물을 기준으로 비교한다.
     labels = {i: f"{int(r['rank'])}위 · {r['name']} ({r['fit_score']:.1f}점)"
               for i, r in top.iterrows()}
-    compare = st.multiselect("비교 대상 (최대 3)",
-                             [i for i in top.index if i != map_sel],
-                             default=[i for i in top.index if i != map_sel][:1],
-                             max_selections=3, format_func=lambda i: labels[i])
-    st.plotly_chart(viz.member_radar(rec, [map_sel] + compare, active),
-                    use_container_width=True, key="radar_members")
-    st.plotly_chart(viz.feature_radar(rec, [map_sel] + compare, list(rec.utility.columns),
-                                      "만족도 프로파일 (1 = 이상점)"),
-                    use_container_width=True, key="radar_features")
+    tabs = st.tabs(["🥇 추천 결과", "🗺️ 동선 지도"])
 
-    if not js_key:
-        st.caption("ℹ️ `KAKAO_JAVASCRIPT_KEY` 를 설정하면 카카오맵으로 표시됩니다.")
+    with tabs[0]:
+        main_cols = {"rank": "순위", "name": "매물", "gu": "지역", "fit_score": "종합",
+                     "sat__공통": "주거", **{f"sat__{m.key}": m.name for m in active},
+                     "sat_min": "최약자", "sat_gap": "격차", "area_m2": "면적(m²)",
+                     "rooms": "방", "parking_slots": "주차", "orientation": "향"}
+        detail_cols = {"name": "매물", "transit_walk_min": "역도보(분)",
+                       **{f"burden_min__{m.key}": f"{m.name} 이동(분)" for m in active},
+                       "travel_mean_min": "평균이동(분)", "travel_std_min": "편차(분)",
+                       "equity_index": "형평성", "green_ratio": "녹지(%)",
+                       "building_age": "연식(년)", "daylight_hours": "일조(h)",
+                       "noise_db": "소음(dB)"}
+
+        st.dataframe(top[[c_ for c_ in main_cols if c_ in top.columns]].rename(columns=main_cols),
+                     use_container_width=True, height=430,
+                     column_config={
+                         "종합": st.column_config.ProgressColumn("종합", min_value=0,
+                                                               max_value=100, format="%.1f"),
+                         "최약자": st.column_config.ProgressColumn("최약자", min_value=0,
+                                                                max_value=100, format="%.1f")})
+        with st.expander("상세보기 — 이동 시간과 주거 환경", expanded=False):
+            st.dataframe(
+                top[[c_ for c_ in detail_cols if c_ in top.columns]].rename(columns=detail_cols),
+                use_container_width=True, height=430)
+
+        st.divider()
+        left, right = st.columns(2)
+        sel = left.selectbox("매물 선택", list(top.index), format_func=lambda i: labels[i])
+        compare = right.multiselect("비교 대상 (최대 3)", [i for i in top.index if i != sel],
+                                    default=[i for i in top.index if i != sel][:1],
+                                    max_selections=3, format_func=lambda i: labels[i])
+
+        st.plotly_chart(viz.member_radar(rec, [sel] + compare, active),
+                        use_container_width=True, key="radar_members")
+        st.plotly_chart(viz.feature_radar(rec, [sel] + compare, list(rec.utility.columns),
+                                          "만족도 프로파일 (1 = 이상점)"),
+                        use_container_width=True, key="radar_features")
+
+        r = top.loc[sel]
+        parts = [f"{m.name} {r[f'burden_min__{m.key}']:.0f}분" for m in active
+                 if f"burden_min__{m.key}" in r and pd.notna(r[f"burden_min__{m.key}"])]
+        st.info(f"**{r['name']}** · {r['gu']} — 전용 {r['area_m2']:.0f}m² / "
+                f"방 {int(r['rooms'])} / 주차 {r['parking_slots']:.2f}대 / "
+                f"{r['orientation']}향 / 역도보 {r['transit_walk_min']:.0f}분"
+                + ("  ·  " + " · ".join(parts) if parts else ""))
+
+    with tabs[1]:
+        # 후보가 바뀌면 이전 선택이 목록에 없을 수 있으므로 key 를 두지 않는다.
+        map_sel = st.selectbox("동선을 볼 매물", list(top.index),
+                               format_func=lambda i: labels[i])
+        r_sel = top.loc[map_sel]
+
+        routes: dict[tuple[str, str], dict] = {}
+        settings = load_settings()
+        odsay_key = read_api_key("ODSAY_API_KEY")
+        tmap_key = read_api_key("TMAP_APP_KEY")
+        # 지도 동선은 "선택한 매물 1건" 에 대해서만 조회하므로 호출이 몇 건뿐이다.
+        # 전체 매물 × 목적지를 도는 이동시간 계산(경로 API 토글)과 달리 항상
+        # 실제 경로를 가져온다 — 토글이 꺼져 있다고 대중교통까지 직선으로 그리면
+        # 지나는 역을 하나도 안 보여주게 된다.
+        if settings.has_kakao_key or odsay_key or tmap_key:
+            with st.spinner("실제 동선 조회 중..."):
+                for m in active:
+                    for dst in m.enabled_destinations:
+                        routes[(m.key, dst.key)] = fetch_real_route(
+                            float(r_sel["lat"]), float(r_sel["lon"]),
+                            float(dst.lat), float(dst.lon), dst.mode,
+                            settings.kakao_rest_api_key, odsay_key, tmap_key)
+
+        if settings.has_kakao_js_key:
+            # components.html(=about:srcdoc) 이 아니라 커스텀 컴포넌트로 띄운다.
+            # srcdoc 문서에서는 카카오 SDK 가 location.protocol 을 "about:" 으로
+            # 읽어 2단계 스크립트를 http 로 요청하고, mixed content 로 막힌다.
+            viz_kakao.render_kakao_map(top, active, map_sel, routes,
+                                       settings.kakao_javascript_key,
+                                       height=560, key="kakao_map")
+        else:
+            kind, obj = viz.build_map(top, active, map_sel, routes=routes)
+            if kind == "folium" and HAS_ST_FOLIUM:
+                st_folium(obj, height=560, use_container_width=True)
+            elif kind == "folium":
+                st.components.v1.html(obj._repr_html_(), height=560)
+            else:
+                st.plotly_chart(obj, use_container_width=True, key="map_plotly")
+            st.caption("ℹ️ `KAKAO_JAVASCRIPT_KEY` 를 설정하면 카카오맵으로 표시됩니다.")
+
+        if routes:
+            badge = {"real": "✅ 실제 경로", "walk": "➖ 직선(도보)",
+                     "no_route": "⚠️ 경로 없음", "error": "❌ 조회 실패",
+                     "no_key": "➖ 키 없음"}
+            rows = []
+            for m in active:
+                for dst in m.enabled_destinations:
+                    info = routes.get((m.key, dst.key), {})
+                    rows.append({"구성원": m.name, "목적지": dst.label,
+                                 "이동수단": TRAVEL_MODES[dst.mode],
+                                 "경로": badge.get(info.get("status"), "-"),
+                                 "비고": info.get("reason", "")})
+            status = pd.DataFrame(rows)
+            with st.expander("경로 조회 상태 — 왜 어떤 선은 직선인가", expanded=True):
+                st.dataframe(status, use_container_width=True, hide_index=True)
+                failed = status[status["경로"] == "❌ 조회 실패"]
+                if not failed.empty:
+                    why = " ".join(failed["비고"].astype(str))
+                    if "OPEN_MAP_AND_LOCAL" in why:
+                        st.warning(
+                            "대중교통 경로가 `disabled OPEN_MAP_AND_LOCAL` 로 막혔습니다. "
+                            "지금 쓰는 **REST API 키의 앱**에서 "
+                            "[제품 설정 > 카카오맵] 사용 설정이 꺼져 있다는 뜻입니다. "
+                            "자동차 길찾기(카카오모빌리티)는 권한이 달라 이 설정과 무관하게 동작하므로, "
+                            "차만 되고 대중교통만 실패한다면 십중팔구 이 경우입니다. "
+                            "앱이 여러 개라면 배포본 Secrets 의 키가 다른 앱 것은 아닌지도 확인하세요.")
+                    else:
+                        st.warning(
+                            "대중교통 경로 조회에 실패했습니다. 디벨로퍼스 콘솔에서 "
+                            "[내 애플리케이션 > 제품 설정 > 카카오맵] 사용 설정을 확인하세요. "
+                            "자동차 길찾기(카카오모빌리티)와 권한이 다릅니다.")
+
+                # 지도 선과 별개로, 이동 "시간" 이 추정치로 떨어진 이동수단도 알린다.
+                # (도보는 API 자체가 없으니 굳이 경고하지 않는다)
+                api_notes = {m: r for m, r in travel_fallbacks.items() if m != "walk"}
+                if api_notes:
+                    st.info("이동 **시간**을 실제 API 로 못 받아 추정치로 계산한 이동수단: "
+                            + " / ".join(f"{TRAVEL_MODES.get(m, m)} — {r}"
+                                         for m, r in api_notes.items()))
+
+        mrow = top.loc[map_sel]
+        for m in active:
+            cols_ = st.columns(max(len(m.enabled_destinations), 1))
+            for col, dst in zip(cols_, m.enabled_destinations):
+                val = mrow.get(dst.column(m.key))
+                col.metric(f"{m.name} → {dst.label}",
+                           f"{val:.0f}분" if pd.notna(val) else "-",
+                           TRAVEL_MODES[dst.mode], delta_color="off")
 
 
 # =========================================================================== #
