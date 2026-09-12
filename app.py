@@ -589,7 +589,10 @@ def render_setup() -> None:
             k = a.slider("추천 매물 수", 3, 30, int(val("k", 10)))
             min_candidates = b.slider("최소 확보 후보", 1, 30, int(val("min_candidates", 5)))
             sort_mode = st.radio("정렬 기준", SORT_MODES, index=SORT_MODES.index(val("sort_mode", SORT_MODES[0])), horizontal=True)
-            use_api = st.toggle("실제 경로 API 사용", value=bool(val("use_api", False)), help="키가 없거나 조회에 실패하면 거리 기반 추정치로 자동 전환됩니다.")
+            # 경로 API는 항상 사용한다 — 키가 없거나 호출이 실패하면 거리 기반 추정으로 자동 폴백한다.
+            use_api = True
+            if not ApiTravelProvider().available:
+                st.warning("API 키가 없어 거리 기반 추정으로 동작합니다.")
             scaler_kind = st.selectbox("계산 스케일러", ["robust", "minmax", "standard"], index=["robust", "minmax", "standard"].index(val("scaler", "robust")), format_func=lambda x: {"robust":"RobustScaler (권장)","minmax":"MinMax","standard":"Standard"}[x])
             clip_q = st.slider("이상치 클리핑 (%)", 0.0, 5.0, float(val("clip_q", .01))*100, .5) / 100
             st.caption(f"현재 {'최신 공공' if st.session_state.listing_source == 'public' else '내장'} 후보 {len(listings)}건을 사용합니다.")
