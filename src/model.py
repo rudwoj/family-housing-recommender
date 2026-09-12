@@ -122,7 +122,6 @@ class FamilyHousingRecommender:
         self._register_features()
 
     def _register_features(self) -> None:
-    def _register_features(self) -> None:
         # 인스턴스별로 들고 있는다. FEATURE_REGISTRY 는 label_of() 용 전역이라
         # 한 프로세스의 여러 Streamlit 세션이 함께 쓰는데, 예전처럼 clear() 하면
         # 다른 세션이 계산 중인 컬럼이 사라져 KeyError 로 터진다.
@@ -135,6 +134,7 @@ class FamilyHousingRecommender:
                         features[col] = travel_feature(m, d, mode)
         self.features = features
         FEATURE_REGISTRY.update(features)
+
     # ---------------- 피처 구성 ---------------- #
     @property
     def active_members(self) -> list[Member]:
