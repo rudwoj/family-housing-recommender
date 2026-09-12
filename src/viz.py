@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -300,3 +302,133 @@ def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None 
                       legend=dict(orientation="h", y=-0.05),
                       title=f"선택 매물 기준 구성원 동선 — {r['name']}")
     return "plotly", fig
+
+
+# --------------------------------------------------------------------------- #
+# 8. 카카오맵 (Kakao Maps JS SDK) 렌더링
+# --------------------------------------------------------------------------- #
+def build_kakao_map_html(top: pd.DataFrame, members: list[Member], js_key: str,
+                         selected_id: str | None = None,
+                         routes: dict[tuple[str, str], dict] | None = None,
+                         height: int = 560) -> str:
+    """동선 지도를 카카오맵(Kakao Maps JS SDK) 위에 그린 HTML 조각을 반환한다.
+
+    developers.kakao.com 앱의 "JavaScript 키"가 필요하다(REST API 키와는 별개).
+    또한 그 앱의 [플랫폼 > Web]에 현재 서비스 도메인(로컬이면 예: http://localhost:8501)이
+    등록돼 있어야 한다 — 미등록 도메인이면 SDK가 조용히 실패하므로, 그 경우를 위해
+    JS 쪽에서 에러를 잡아 안내 문구로 대체한다. st.components.v1.html 로 임베드해서 쓴다.
+    """
+    sel = selected_id if selected_id in top.index else top.index[0]
+    r = top.loc[sel]
+    routes = routes or {}
+
+    def route_for(mem, d):
+        info = routes.get((mem.key, d.key)) or {}
+        path = info.get("path") or []
+        if len(path) >= 2:
+            return path, True
+        return [(float(r["lat"]), float(r["lon"])), (float(d.lat), float(d.lon))], False
+
+    listings = [{
+        "lat": float(row["lat"]), "lon": float(row["lon"]),
+        "name": str(row["name"]), "rank": int(row["rank"]),
+        "selected": bool(lid == sel),
+    } for lid, row in top.iterrows()]
+
+    lines, destinations, seen_dest = [], [], set()
+    for mem in members:
+        for d in mem.enabled_destinations:
+            path, is_real = route_for(mem, d)
+            lines.append({
+                "path": [[float(p[0]), float(p[1])] for p in path],
+                "color": mem.color, "real": is_real,
+                "label": f"{mem.name} → {d.label} ({TRAVEL_MODES[d.mode]})"
+                        + ("" if is_real else " · 실제 경로 조회 실패, 직선 추정"),
+            })
+            dkey = (d.key, round(float(d.lat), 6), round(float(d.lon), 6))
+            if dkey not in seen_dest:
+                seen_dest.add(dkey)
+                destinations.append({"lat": float(d.lat), "lon": float(d.lon),
+                                     "label": f"{mem.name} · {d.label}"})
+
+    data = {"center": [float(top["lat"].mean()), float(top["lon"].mean())],
+           "listings": listings, "lines": lines, "destinations": destinations}
+    payload = json.dumps(data, ensure_ascii=False)
+
+    if not js_key:
+        return ("<div style=\"padding:16px;color:#b91c1c;"
+                "font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;font-size:13px;\">"
+                "카카오 JS 키(KAKAO_JS_KEY)가 설정되지 않아 카카오맵을 띄울 수 없습니다.</div>")
+
+    return f"""
+<div id="kakao-map" style="width:100%;height:{height}px;border-radius:8px;"></div>
+<div id="kakao-map-error" style="display:none;padding:8px 4px;color:#b91c1c;
+    font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;font-size:13px;">
+  카카오맵을 불러오지 못했습니다. JS 키의 플랫폼(Web) 등록 도메인에 현재 접속 주소가
+  포함돼 있는지 developers.kakao.com 콘솔에서 확인해 주세요.
+</div>
+<script src="https://dapi.kakao.com/v3.js?appkey={js_key}&autoload=false&libraries=services"></script>
+<script>
+(function() {{
+  var DATA = {payload};
+  function showError(e) {{
+    document.getElementById('kakao-map').style.display = 'none';
+    document.getElementById('kakao-map-error').style.display = 'block';
+    if (e) {{ console.error(e); }}
+  }}
+  function ready() {{
+    try {{
+      var container = document.getElementById('kakao-map');
+      var map = new kakao.maps.Map(container, {{
+        center: new kakao.maps.LatLng(DATA.center[0], DATA.center[1]), level: 7
+      }});
+      var bounds = new kakao.maps.LatLngBounds();
+
+      DATA.listings.forEach(function(l) {{
+        var pos = new kakao.maps.LatLng(l.lat, l.lon);
+        bounds.extend(pos);
+        var size = l.selected ? 28 : 22;
+        var el = document.createElement('div');
+        el.textContent = l.rank;
+        el.title = l.rank + '위 · ' + l.name;
+        el.style.cssText = 'display:flex;align-items:center;justify-content:center;' +
+          'width:' + size + 'px;height:' + size + 'px;border-radius:50%;color:#fff;' +
+          'font-size:12px;font-weight:600;font-family:sans-serif;' +
+          'background:' + (l.selected ? '#2563eb' : '#94a3b8') + ';' +
+          'box-shadow:0 1px 4px rgba(0,0,0,0.35);cursor:default;';
+        new kakao.maps.CustomOverlay({{ position: pos, content: el, yAnchor: 0.5 }}).setMap(map);
+      }});
+
+      DATA.destinations.forEach(function(d) {{
+        var pos = new kakao.maps.LatLng(d.lat, d.lon);
+        bounds.extend(pos);
+        var marker = new kakao.maps.Marker({{ position: pos, map: map, title: d.label }});
+        var iw = new kakao.maps.InfoWindow({{ content:
+          '<div style="padding:4px 8px;font-size:12px;white-space:nowrap;">' + d.label + '</div>' }});
+        kakao.maps.event.addListener(marker, 'mouseover', function() {{ iw.open(map, marker); }});
+        kakao.maps.event.addListener(marker, 'mouseout', function() {{ iw.close(); }});
+      }});
+
+      DATA.lines.forEach(function(ln) {{
+        var path = ln.path.map(function(p) {{ return new kakao.maps.LatLng(p[0], p[1]); }});
+        path.forEach(function(p) {{ bounds.extend(p); }});
+        new kakao.maps.Polyline({{
+          path: path, strokeWeight: ln.real ? 4 : 3, strokeColor: ln.color,
+          strokeOpacity: ln.real ? 0.85 : 0.55,
+          strokeStyle: ln.real ? 'solid' : 'shortdash', map: map
+        }});
+      }});
+
+      map.setBounds(bounds);
+    }} catch (e) {{
+      showError(e);
+    }}
+  }}
+  if (window.kakao && window.kakao.maps) {{
+    kakao.maps.load(ready);
+  }} else {{
+    showError('Kakao Maps SDK failed to load');
+  }}
+}})();
+</script>
+"""

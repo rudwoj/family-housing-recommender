@@ -447,13 +447,19 @@ def render_result(conf: dict) -> None:
                             float(dst.lat), float(dst.lon), dst.mode,
                             settings.kakao_rest_api_key)
 
-        kind, obj = viz.build_map(top, active, map_sel, routes=routes)
-        if kind == "folium" and HAS_ST_FOLIUM:
-            st_folium(obj, height=560, use_container_width=True)
-        elif kind == "folium":
-            st.components.v1.html(obj._repr_html_(), height=560)
+        if settings.has_kakao_js_key:
+            html = viz.build_kakao_map_html(top, active, settings.kakao_js_key, map_sel,
+                                            routes=routes, height=560)
+            st.components.v1.html(html, height=580)
         else:
-            st.plotly_chart(obj, use_container_width=True, key="map_plotly")
+            kind, obj = viz.build_map(top, active, map_sel, routes=routes)
+            if kind == "folium" and HAS_ST_FOLIUM:
+                st_folium(obj, height=560, use_container_width=True)
+            elif kind == "folium":
+                st.components.v1.html(obj._repr_html_(), height=560)
+            else:
+                st.plotly_chart(obj, use_container_width=True, key="map_plotly")
+            st.caption("카카오맵으로 보려면 .env 에 KAKAO_JS_KEY(JavaScript 키)를 설정하세요.")
         if conf["use_api"]:
             st.caption("실선 = 카카오 실제 경로(운전/대중교통) · 점선 = 조회 실패 시 직선 추정 "
                        "(도보 목적지는 전용 경로 API가 없어 항상 직선입니다)")
