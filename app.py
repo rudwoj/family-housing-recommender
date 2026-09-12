@@ -181,7 +181,9 @@ st.session_state.setdefault("listing_source_error", "")
 # 위젯 key(selected_gu_widget)가 아니라 별도 키에 담아 둔다. 결과 화면으로 넘어가면
 # 설정 화면의 위젯이 렌더링되지 않아 위젯 상태가 정리되는데, 그때 선택이 비어버리면
 # 엉뚱하게 내장 목업 데이터로 폴백된다.
-st.session_state.setdefault("gu_choice", ["강남구", "송파구", "마포구"])
+# 기본값을 비워 둔다. 구가 골라진 것처럼 보이는데 실제로는 내장 데이터를 쓰고 있으면,
+# 고르지도 않은 구가 결과에 떠서 사용자가 오해한다.
+st.session_state.setdefault("gu_choice", [])
 
 listings = load_listings()
 public_listing_stats: dict | None = None
@@ -570,13 +572,16 @@ def render_setup() -> None:
                 default=st.session_state.gu_choice, key="selected_gu_widget",
                 on_change=_on_gu_change, disabled=not public_data_ready,
                 help="고른 구의 최신 실거래 매물을 전부 가져옵니다. 선택하면 바로 반영됩니다.")
+            # 어떤 데이터를 쓰는 중인지는 선택이 아니라 listing_source 로 판단해야 한다.
+            using_public = st.session_state.listing_source == "public"
             if not public_data_ready:
                 st.caption("DATA_GO_KR_SERVICE_KEY와 KAKAO_REST_API_KEY가 필요합니다.")
-            elif not gu_names:
-                st.caption(f"자치구를 고르면 해당 구의 최신 실거래 매물을 불러옵니다. (현재 내장 후보 {len(listings)}건)")
-            else:
+            elif using_public and gu_names:
                 st.caption(f"{'·'.join(gu_names)} 최신 공공데이터 {len(listings)}건 사용 중"
                            + (" · 구가 많으면 첫 수집에 1~2분 걸릴 수 있습니다." if len(gu_names) >= 5 else ""))
+            else:
+                st.caption(f"내장 후보 {len(listings)}건({', '.join(sorted(listings['gu'].unique()))})을 쓰는 중입니다. "
+                           "자치구를 고르면 그 구의 최신 실거래 매물로 바뀝니다.")
             if not public_data_ready:
                 st.caption("DATA_GO_KR_SERVICE_KEY와 KAKAO_REST_API_KEY가 필요합니다.")
             elif st.session_state.listing_source_error:
