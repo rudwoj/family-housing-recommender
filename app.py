@@ -22,7 +22,7 @@ import streamlit as st
 
 from src import viz, viz_kakao
 from src.data_sources import kakao, tmap
-from src.data_sources.config import load_settings
+from src.data_sources.config import SEOUL_GU_NAMES, load_settings
 from src.features import derive_common_features
 from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
                        HardConstraints, WeightConfig, label_of)
@@ -83,11 +83,31 @@ def load_listings() -> pd.DataFrame:
     return derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
 
 
-@st.cache_data(show_spinner="공공데이터에서 최신 주거 후보를 불러오는 중...", ttl=21600)
-def load_latest_public_listings() -> tuple[pd.DataFrame, dict]:
-    """파일 저장 없이 최신 공공데이터 후보를 생성한다."""
-    fresh, stats = build_live_listings(load_settings())
-    return derive_common_features(fresh), stats.as_dict()
+@st.cache_data(show_spinner=False, ttl=21600)
+def load_one_gu_listings(gu_code: str) -> tuple[pd.DataFrame, dict]:
+    """자치구 1곳의 최신 공공데이터 후보. 구 단위로 캐시한다.
+
+    자치구 조합 전체를 캐시 키로 쓰면 구를 하나 추가할 때마다 이미 받아둔 구까지
+    전부 다시 수집하게 된다. 구 단위로 끊어두면 새로 고른 구만 받아오면 된다.
+    """
+    fresh, stats = build_live_listings(load_settings(), [gu_code])
+    return fresh, stats.as_dict()
+
+
+def load_latest_public_listings(gu_codes: tuple[str, ...]) -> tuple[pd.DataFrame, dict]:
+    """선택한 자치구들의 후보를 합친다. 파일은 쓰지 않는다."""
+    frames, merged = [], {}
+    for code in gu_codes:
+        with st.spinner(f"{SEOUL_GU_NAMES.get(code, code)} 공공데이터를 불러오는 중..."):
+            df, stats = load_one_gu_listings(code)
+        frames.append(df)
+        for k, v in stats.items():
+            merged[k] = merged.get(k, 0) + v
+
+    combined = pd.concat(frames, ignore_index=True)
+    # 구별로 따로 만든 id 가 겹치므로 합친 뒤 다시 부여한다.
+    combined["listing_id"] = [f"H{str(i + 1).zfill(4)}" for i in range(len(combined))]
+    return derive_common_features(combined), merged
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -158,12 +178,15 @@ if not os.path.exists(os.path.join(DATA, "listings.csv")):
 st.session_state.setdefault("stage", "setup")
 st.session_state.setdefault("listing_source", "bundled")
 st.session_state.setdefault("listing_source_error", "")
+st.session_state.setdefault("selected_gu", ["강남구", "송파구", "마포구"])
 
 listings = load_listings()
 public_listing_stats: dict | None = None
 if st.session_state.listing_source == "public":
     try:
-        listings, public_listing_stats = load_latest_public_listings()
+        codes = tuple(c for c, name in SEOUL_GU_NAMES.items()
+                      if name in st.session_state.selected_gu)
+        listings, public_listing_stats = load_latest_public_listings(codes)
         st.session_state.listing_source_error = ""
     except Exception as e:
         st.session_state.listing_source = "bundled"
@@ -223,7 +246,7 @@ def render_setup_legacy() -> None:
         source_col.info("기본 내장 후보 데이터를 사용 중입니다.")
     if action_col.button("최신 공공데이터 후보 불러오기", disabled=not can_load_public,
                          use_container_width=True):
-        load_latest_public_listings.clear()
+        load_one_gu_listings.clear()
         st.session_state.listing_source = "public"
         st.rerun()
     if not can_load_public:
@@ -291,7 +314,7 @@ def render_setup_legacy() -> None:
     c_area = r1[1].slider("최소 전용면적 (m²)", 29, 200, int(D("c_area", 60)), key="c_area")
     lock_area = r1[1].checkbox("🔒 절대 사수", value=bool(D("lock_area", False)), key="lock_area")
     c_park = r1[2].slider("최소 주차 가능 대수", 0.0, 3.0, float(D("c_park", 0.5)), step=0.05, key="c_park")
-    c_walk = r1[3].slider("역까지 도보 시간 상한 (분)", 1, 45, int(D("c_walk", 20)), key="c_walk")
+    c_walk = r1[3].slider("역까지 도보 시간 상한 (분)", 1, 45, int(D("c_walk", 10)), key="c_walk")
 
     r2 = st.columns(4)
     c_age = r2[0].slider("최대 준공 경과년수 (년)", 0, 46, int(D("c_age", 30)), key="c_age")
@@ -526,15 +549,23 @@ def render_setup() -> None:
                     members.append(make_default_members(len(members) + 1)[-1])
                     pending_index = len(members) - 1
             st.markdown('<div class="privacy">🛡️ &nbsp; 입력한 위치 정보는 추천을 위해서만 안전하게 사용됩니다.</div>', unsafe_allow_html=True)
-            source_label = (f"최신 공공데이터 {len(listings)}건 사용 중"
-                            if st.session_state.listing_source == "public"
-                            else f"현재 내장 후보 {len(listings)}건 사용 중")
-            if st.button(f"↻ 공공데이터 업데이트 · {source_label}", key="refresh_public_data",
-                         disabled=not public_data_ready, use_container_width=True):
-                load_latest_public_listings.clear()
-                st.session_state.listing_source = "public"
+            def _on_gu_change() -> None:
+                """구를 고르면 곧바로 공공데이터로 전환한다(별도 버튼 없이)."""
+                st.session_state.listing_source = "public" if st.session_state.selected_gu else "bundled"
                 st.session_state.listing_source_error = ""
-                st.rerun()
+
+            gu_names = st.multiselect(
+                "후보를 찾을 자치구 (서울 25개구)", list(SEOUL_GU_NAMES.values()),
+                default=st.session_state.selected_gu, key="selected_gu",
+                on_change=_on_gu_change, disabled=not public_data_ready,
+                help="고른 구의 최신 실거래 매물을 전부 가져옵니다. 선택하면 바로 반영됩니다.")
+            if not public_data_ready:
+                st.caption("DATA_GO_KR_SERVICE_KEY와 KAKAO_REST_API_KEY가 필요합니다.")
+            elif not gu_names:
+                st.caption(f"자치구를 고르면 해당 구의 최신 실거래 매물을 불러옵니다. (현재 내장 후보 {len(listings)}건)")
+            else:
+                st.caption(f"{'·'.join(gu_names)} 최신 공공데이터 {len(listings)}건 사용 중"
+                           + (" · 구가 많으면 첫 수집에 1~2분 걸릴 수 있습니다." if len(gu_names) >= 5 else ""))
             if not public_data_ready:
                 st.caption("DATA_GO_KR_SERVICE_KEY와 KAKAO_REST_API_KEY가 필요합니다.")
             elif st.session_state.listing_source_error:
@@ -630,7 +661,7 @@ def render_setup() -> None:
             lock_area = b.checkbox("면적은 절대 사수", value=bool(val("lock_area", False)))
             a, b = st.columns(2)
             c_park = a.slider("최소 주차 가능 대수", 0.0, 3.0, float(val("c_park", .5)), .05)
-            c_walk = b.slider("역까지 도보 상한 (분)", 1, 45, int(val("c_walk", 20)))
+            c_walk = b.slider("역까지 도보 상한 (분)", 1, 45, int(val("c_walk", 10)))
             a, b = st.columns(2)
             c_age = a.slider("최대 준공 경과년수", 0, 46, int(val("c_age", 30)))
             c_noise = b.slider("최대 주간 소음도 (dB)", 33, 74, int(val("c_noise", 74)))
@@ -711,7 +742,7 @@ def render_setup() -> None:
             Constraint("rooms", "min", val("c_rooms", 3), priority=0, locked=val("lock_rooms", True), label="방 개수"),
             Constraint("area_m2", "min", val("c_area", 60), priority=1, locked=val("lock_area", False), label="전용면적"),
             Constraint("parking_slots", "min", val("c_park", .5), priority=2, label="주차 가능 대수"),
-            Constraint("transit_walk_min", "max", val("c_walk", 20), priority=2, label="역까지 도보"),
+            Constraint("transit_walk_min", "max", val("c_walk", 10), priority=2, label="역까지 도보"),
             Constraint("building_age", "max", val("c_age", 30), priority=3, label="준공 경과년수"),
         ]
         if val("c_noise", 74) < 74:

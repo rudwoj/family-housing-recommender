@@ -33,20 +33,15 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data_sources import kakao, public_data  # noqa: E402
-from src.data_sources.config import load_settings  # noqa: E402
+from src.data_sources.config import SEOUL_GU_NAMES, load_settings  # noqa: E402
 from src.schema import ORIENTATION_SCORE, assert_no_price_columns, make_default_members  # noqa: E402
 from src.travel import EstimatedTravelProvider, travel_matrix  # noqa: E402
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 SEED = 42
 
-# 기본값(서울 10개 구) — data/generate_mock_data.py 의 DISTRICTS 와 동일한 권역으로 맞춰
-# 실데이터/목업 산출물을 비교하기 쉽게 한다.
-GU_NAMES = {
-    "11680": "강남구", "11710": "송파구", "11440": "마포구", "11200": "성동구",
-    "11350": "노원구", "11470": "양천구", "11560": "영등포구", "11380": "은평구",
-    "11590": "동작구", "11215": "광진구",
-}
+#: 서울 25개 자치구. 앱의 자치구 선택 UI 와 같은 표를 봐야 코드-이름 매핑이 어긋나지 않는다.
+GU_NAMES = SEOUL_GU_NAMES
 
 CITY = "서울특별시"
 WALK_M_PER_MIN = 67.0  # 도보 평균 속도(분속) — mock 의 transit_walk_min 분포와 맞춘 근사치
@@ -55,9 +50,9 @@ WALK_M_PER_MIN = 67.0  # 도보 평균 속도(분속) — mock 의 transit_walk_
 #: 호출 간격(sleep) 대신 워커 수로 동시성을 제한한다.
 MAX_WORKERS = 12
 
-#: 시군구당 한 번에 받아오는 실거래 원시 행 수. 중복·불량 행을 걸러낸 뒤 cap 만큼만 쓰므로
-#: 넉넉히 받아야 cap 을 채울 수 있다(1000행 응답도 0.5초 수준).
-RAW_ROWS_PER_SIGUNGU = 1000
+#: 시군구당 받아오는 실거래 원시 행 수. 한 달치 거래가 가장 많은 구(강서구)가 1,300건 수준이라
+#: 넉넉히 잡아 한 번에 다 받는다(2000행 응답도 0.5초 수준).
+RAW_ROWS_PER_SIGUNGU = 2000
 
 
 def _walk_minutes_estimate(rng: np.random.Generator, n: int) -> np.ndarray:
@@ -75,11 +70,14 @@ class Stats:
     def as_dict(self) -> dict:
         return vars(self)
 
-def fetch_raw_rent_rows(settings, stats: Stats) -> list[dict]:
-    """전월세 실거래가 API에서 시군구별로 원시 행을 모으고 가격 필드를 제거한다."""
-    raw_rows = []
+def fetch_raw_rent_rows(settings, stats: Stats, codes: list[str] | None = None) -> list[dict]:
+    """전월세 실거래가 API에서 시군구별로 원시 행을 모으고 가격 필드를 제거한다.
+
+    codes 로 조회할 자치구를 좁힐 수 있다(없으면 설정값 전체).
+    구마다 settings.max_listings_per_gu 건까지 담는다 — 거래가 적은 구는 있는 만큼만
+    담기고, 많은 구는 상한까지 채운다. 여러 구를 고르면 그만큼 합계가 늘어난다.
+    """
     seen = set()
-    cap = settings.max_complexes_per_sigungu or 20
 
     def fetch_one(code: str):
         return public_data.fetch_apt_rent(code, settings.target_deal_ym,
@@ -87,11 +85,13 @@ def fetch_raw_rent_rows(settings, stats: Stats) -> list[dict]:
                                           endpoint=settings.apt_rent_endpoint,
                                           num_of_rows=RAW_ROWS_PER_SIGUNGU)
 
-    codes = list(settings.target_sigungu_codes)
+    codes = list(codes if codes is not None else settings.target_sigungu_codes)
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(len(codes), 1))) as pool:
         responses = list(pool.map(fetch_one, codes))
 
     # 시군구 순서대로 훑어야 listing_id 부여가 재현 가능하다.
+    cap = settings.max_listings_per_gu
+    raw_rows: list[dict] = []
     for code, resp in zip(codes, responses):
         gu = GU_NAMES.get(code, code)
         if not resp.ok:
@@ -242,9 +242,10 @@ def build_listings(geocoded: list[dict], transit_walk_min: list[float],
     return df
 
 
-def build_live_listings(settings) -> tuple[pd.DataFrame, Stats]:
+def build_live_listings(settings, codes: list[str] | None = None) -> tuple[pd.DataFrame, Stats]:
     """공공데이터와 카카오 API에서 추천 후보를 메모리에 생성한다.
 
+    codes 로 조회할 자치구를 좁힐 수 있다(없으면 설정값 전체).
     CLI 배치와 Streamlit 앱이 같은 수집 규칙을 사용하며, 이 함수는 파일을 쓰지
     않아 Community Cloud의 읽기 전용 배포 환경에서도 호출할 수 있다.
     """
@@ -253,7 +254,7 @@ def build_live_listings(settings) -> tuple[pd.DataFrame, Stats]:
 
     stats = Stats()
     rng = np.random.default_rng(SEED)
-    raw_rows = fetch_raw_rent_rows(settings, stats)
+    raw_rows = fetch_raw_rent_rows(settings, stats, codes)
     geocoded = geocode_rows(raw_rows, settings, stats)
     if not geocoded:
         raise ValueError("공공데이터에서 좌표가 확인된 후보를 가져오지 못했습니다.")
