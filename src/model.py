@@ -122,15 +122,19 @@ class FamilyHousingRecommender:
         self._register_features()
 
     def _register_features(self) -> None:
-        FEATURE_REGISTRY.clear()
-        FEATURE_REGISTRY.update({f.key: f for f in COMMON_FEATURES})
+    def _register_features(self) -> None:
+        # 인스턴스별로 들고 있는다. FEATURE_REGISTRY 는 label_of() 용 전역이라
+        # 한 프로세스의 여러 Streamlit 세션이 함께 쓰는데, 예전처럼 clear() 하면
+        # 다른 세션이 계산 중인 컬럼이 사라져 KeyError 로 터진다.
+        features: dict[str, Feature] = {f.key: f for f in COMMON_FEATURES}
         for m in self.members:
             for d in m.destinations:
                 for mode in ("drive", "transit", "walk"):
                     col = d.column(m.key, mode)
                     if col in self.data.columns:
-                        FEATURE_REGISTRY[col] = travel_feature(m, d, mode)
-
+                        features[col] = travel_feature(m, d, mode)
+        self.features = features
+        FEATURE_REGISTRY.update(features)
     # ---------------- 피처 구성 ---------------- #
     @property
     def active_members(self) -> list[Member]:
@@ -294,7 +298,7 @@ class FamilyHousingRecommender:
         raw = raw[cols]
 
         pipe = UtilityPipeline(self.scaler_kind, self.clip_q, self.n_impute_neighbors)
-        util = pipe.fit_transform(raw, {c: FEATURE_REGISTRY[c] for c in cols})
+        util = pipe.fit_transform(raw, {c: self.features[c] for c in cols})
 
         raw_filled = pipe.inverse_raw(pipe.position)
         candidates = candidates.copy()
@@ -402,10 +406,9 @@ class FamilyHousingRecommender:
                               cluster_profile=profile, member_tops=member_tops,
                               intersection=intersection, diagnostics=diagnostics)
 
-    @staticmethod
-    def _ideal_raw(pipe: UtilityPipeline, cols: list[str]) -> pd.Series:
+    def _ideal_raw(self, pipe: UtilityPipeline, cols: list[str]) -> pd.Series:
         """만족도 1 에 해당하는 원 단위 값 (방향성에 따라 관측 최댓값/최솟값)."""
-        ideal_pos = pd.DataFrame([[1.0 if FEATURE_REGISTRY[c].direction == "higher" else 0.0
+        ideal_pos = pd.DataFrame([[1.0 if self.features[c].direction == "higher" else 0.0
                                    for c in cols]], columns=cols)
         return pipe.inverse_raw(ideal_pos).iloc[0].round(1)
 
