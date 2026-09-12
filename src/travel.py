@@ -111,8 +111,6 @@ class ApiTravelProvider(TravelProvider):
     실제 경로 API 연동.
 
       KAKAO_REST_API_KEY : 자동차(카카오모빌리티) + 대중교통(카카오맵 경로 조회)
-      ODSAY_API_KEY      : 대중교통 (있으면 이쪽을 먼저 쓴다 — 카카오 대중교통은
-                           응답이 커서 배포 환경에서 타임아웃이 잦다)
       TMAP_APP_KEY       : 도보 (SK open API. 국내에서 보행자 경로를 주는 곳이
                            사실상 여기뿐이라, 없으면 도보는 거리 기반 추정)
 
@@ -130,23 +128,19 @@ class ApiTravelProvider(TravelProvider):
         self.fallback = fallback or EstimatedTravelProvider()
         self.timeout = timeout
         self.kakao_key = _secret("KAKAO_REST_API_KEY")
-        self.odsay_key = _secret("ODSAY_API_KEY")
-        self.odsay_referer = _secret("ODSAY_REFERER")
         self.tmap_key = _secret("TMAP_APP_KEY")
         #: 모드별 마지막 실패 사유 — 화면에서 "왜 추정치인가" 를 보여주기 위함
         self.last_error: dict[str, str] = {}
 
     @property
     def available(self) -> bool:
-        return bool(self.kakao_key or self.odsay_key or self.tmap_key)
+        return bool(self.kakao_key or self.tmap_key)
 
     def supports(self, mode: str) -> bool:
         """실제 API 로 계산 가능한 모드인지."""
-        if mode == "drive":
+        if mode in ("drive", "transit"):
             return bool(self.kakao_key)
-        if mode == "transit":
-            return bool(self.kakao_key or self.odsay_key)
-        # 도보는 카카오/ODsay 모두 전용 길찾기가 없다. TMap 이 있을 때만 실측한다.
+        # 도보는 카카오에 전용 길찾기가 없다. TMap 이 있을 때만 실측한다.
         return bool(self.tmap_key)
 
     def minutes(self, lat, lon, dest: Destination, mode: str) -> np.ndarray:
@@ -155,7 +149,7 @@ class ApiTravelProvider(TravelProvider):
             if mode == "walk":
                 self.last_error.setdefault(
                     mode, "TMAP_APP_KEY 가 없어 거리 기반 추정 "
-                         "(카카오·ODsay 는 도보 길찾기를 제공하지 않는다)")
+                         "(카카오는 도보 길찾기를 제공하지 않는다)")
             return est
 
         lats, lons = np.asarray(lat, dtype=float), np.asarray(lon, dtype=float)
@@ -189,28 +183,9 @@ class ApiTravelProvider(TravelProvider):
                                              timeout=int(self.timeout))
             return route.duration_sec / 60.0 if route else None
 
-        # 대중교통: ODsay 를 먼저 쓴다. 카카오 대중교통은 경로 수십 개의 좌표까지
-        # 실려와 응답이 크고, 배포 환경의 느린 네트워크에서 타임아웃이 잦았다.
-        if self.odsay_key:
-            from .data_sources import odsay as odsay_api
-            try:
-                route = odsay_api.transit_route(la, lo, dest.lat, dest.lon,
-                                                self.odsay_key, timeout=int(self.timeout),
-                                                referer=self.odsay_referer)
-                if route is not None:
-                    return route.total_time_sec / 60.0
-            except Exception as e:                      # noqa: BLE001
-                self.last_error.setdefault("transit", f"ODsay: {str(e)[:120]}")
-                if not self.kakao_key:
-                    raise
-
-        if self.kakao_key:
-            route = kakao_api.transit_route(la, lo, dest.lat, dest.lon, self.kakao_key,
-                                            timeout=int(self.timeout))
-            if route is not None:
-                return route.total_time_sec / 60.0
-
-        return None
+        route = kakao_api.transit_route(la, lo, dest.lat, dest.lon, self.kakao_key,
+                                        timeout=int(self.timeout))
+        return route.total_time_sec / 60.0 if route else None
 
 
 # --------------------------------------------------------------------------- #

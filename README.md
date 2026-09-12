@@ -22,7 +22,7 @@ python tests/test_model.py
 
 목적지는 앱에서 프리셋 선택 또는 좌표 직접 입력으로 바꿀 수 있고, 바뀌면 이동 시간이 즉시 재계산된다.
 `src/travel.py` 의 Provider 를 갈아끼우면 실제 경로 API 로 대체된다
-(`KAKAO_REST_API_KEY`, `ODSAY_API_KEY`; 키가 없거나 실패하면 거리 기반 추정으로 폴백).
+(`KAKAO_REST_API_KEY`, `TMAP_APP_KEY`; 키가 없거나 실패하면 거리 기반 추정으로 폴백).
 
 ## 파이프라인
 

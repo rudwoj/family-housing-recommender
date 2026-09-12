@@ -21,7 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from src import viz, viz_kakao
-from src.data_sources import kakao, odsay, tmap
+from src.data_sources import kakao, tmap
 from src.data_sources.config import load_settings
 from src.features import derive_common_features
 from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
@@ -92,8 +92,7 @@ def load_latest_public_listings() -> tuple[pd.DataFrame, dict]:
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
-                     mode: str, api_key: str, odsay_key: str = "",
-                     tmap_key: str = "", odsay_referer: str = "") -> dict:
+                     mode: str, api_key: str, tmap_key: str = "") -> dict:
     """
     카카오 API로 실제 이동 경로 좌표를 가져온다.
 
@@ -104,11 +103,11 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
       error     호출 실패 (권한/설정 문제일 가능성이 높다)
     왜 직선으로 나오는지 화면에서 확인할 수 있도록 이유를 삼키지 않고 돌려준다.
     """
-    if not api_key and not odsay_key and not tmap_key:
+    if not api_key and not tmap_key:
         return {"path": [], "status": "no_key", "reason": "경로 API 키 없음"}
 
     if mode == "walk":
-        # 도보는 카카오·ODsay 모두 길찾기가 없어 TMap 으로만 실측할 수 있다.
+        # 도보는 카카오에 길찾기가 없어 TMap 으로만 실측할 수 있다.
         if not tmap_key:
             return {"path": [], "status": "walk",
                     "reason": "TMAP_APP_KEY 가 없어 직선으로 표시합니다"}
@@ -122,18 +121,6 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
             # 출발-도착이 너무 멀면 TMap 이 경로를 거부한다. 타임아웃 같은 네트워크
             # 오류까지 함께 잡아야 한다 — 여기서 새면 앱 전체가 죽는다.
             return {"path": [], "status": "walk", "reason": f"TMap: {str(e)[:120]}"}
-    if mode == "transit" and odsay_key:
-        # 대중교통은 ODsay 를 먼저 쓴다 (카카오 대중교통은 응답이 커서 느리다).
-        try:
-            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key,
-                                        referer=odsay_referer)
-            if route is not None and len(route.path) >= 2:
-                return {"path": route.path, "status": "real", "reason": "ODsay",
-                        "minutes": route.total_time_sec / 60.0}
-        except Exception as e:                      # noqa: BLE001 - 타임아웃 포함
-            if not api_key:
-                return {"path": [], "status": "error", "reason": f"ODsay: {str(e)[:140]}"}
-
     if not api_key:
         return {"path": [], "status": "no_key", "reason": "카카오 키 없음"}
     try:
@@ -430,7 +417,6 @@ def render_setup() -> None:
     member_places: dict = draft["places"]
     settings = load_settings()
     kakao_ready = settings.has_kakao_key
-    odsay_ready = bool(read_api_key("ODSAY_API_KEY"))
     tmap_ready = bool(read_api_key("TMAP_APP_KEY"))
     public_data_ready = settings.has_data_go_kr_key and kakao_ready
     member_index = min(int(st.session_state.get("member_index", 0)), len(members) - 1)
@@ -680,8 +666,7 @@ def render_setup() -> None:
             use_api = True
             st.markdown(
                 '<div class="api-grid">'
-                f'<span class="api-chip{"" if kakao_ready else " off"}">Kakao 자동차 {"연결" if kakao_ready else "키 필요"}</span>'
-                f'<span class="api-chip{"" if odsay_ready else " off"}">ODsay 대중교통 {"연결" if odsay_ready else "키 필요"}</span>'
+                f'<span class="api-chip{"" if kakao_ready else " off"}">Kakao 자동차·대중교통 {"연결" if kakao_ready else "키 필요"}</span>'
                 f'<span class="api-chip{"" if tmap_ready else " off"}">TMAP 도보 {"연결" if tmap_ready else "키 필요"}</span>'
                 '</div>', unsafe_allow_html=True)
             scaler_kind = st.selectbox("계산 스케일러", ["robust", "minmax", "standard"], index=["robust", "minmax", "standard"].index(val("scaler", "robust")), format_func=lambda x: {"robust":"RobustScaler (권장)","minmax":"MinMax","standard":"Standard"}[x])
@@ -811,18 +796,15 @@ def render_result(conf: dict) -> None:
 
     routes: dict[tuple[str, str], dict] = {}
     settings = load_settings()
-    odsay_key = read_api_key("ODSAY_API_KEY")
-    odsay_referer = read_api_key("ODSAY_REFERER")
     tmap_key = read_api_key("TMAP_APP_KEY")
-    if settings.has_kakao_key or odsay_key or tmap_key:
+    if settings.has_kakao_key or tmap_key:
         with st.spinner("실제 동선 조회 중..."):
             for m in active:
                 for dst in m.enabled_destinations:
                     routes[(m.key, dst.key)] = fetch_real_route(
                         float(r_sel["lat"]), float(r_sel["lon"]),
                         float(dst.lat), float(dst.lon), dst.mode,
-                        settings.kakao_rest_api_key, odsay_key, tmap_key,
-                        odsay_referer)
+                        settings.kakao_rest_api_key, tmap_key)
 
     # 카카오 JS 키가 있으면 카카오맵, 없으면 Leaflet(OSM)을 사용한다.
     # 어느 쪽이든 왼쪽 추천·점수 오버레이 UI는 동일하다.
