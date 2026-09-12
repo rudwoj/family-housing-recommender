@@ -131,6 +131,7 @@ class ApiTravelProvider(TravelProvider):
         self.timeout = timeout
         self.kakao_key = _secret("KAKAO_REST_API_KEY")
         self.odsay_key = _secret("ODSAY_API_KEY")
+        self.odsay_referer = _secret("ODSAY_REFERER")
         self.tmap_key = _secret("TMAP_APP_KEY")
         #: 모드별 마지막 실패 사유 — 화면에서 "왜 추정치인가" 를 보여주기 위함
         self.last_error: dict[str, str] = {}
@@ -194,7 +195,8 @@ class ApiTravelProvider(TravelProvider):
             from .data_sources import odsay as odsay_api
             try:
                 route = odsay_api.transit_route(la, lo, dest.lat, dest.lon,
-                                                self.odsay_key, timeout=int(self.timeout))
+                                                self.odsay_key, timeout=int(self.timeout),
+                                                referer=self.odsay_referer)
                 if route is not None:
                     return route.total_time_sec / 60.0
             except Exception as e:                      # noqa: BLE001

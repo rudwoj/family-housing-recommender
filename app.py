@@ -93,7 +93,7 @@ def load_latest_public_listings() -> tuple[pd.DataFrame, dict]:
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
                      mode: str, api_key: str, odsay_key: str = "",
-                     tmap_key: str = "") -> dict:
+                     tmap_key: str = "", odsay_referer: str = "") -> dict:
     """
     카카오 API로 실제 이동 경로 좌표를 가져온다.
 
@@ -125,7 +125,8 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
     if mode == "transit" and odsay_key:
         # 대중교통은 ODsay 를 먼저 쓴다 (카카오 대중교통은 응답이 커서 느리다).
         try:
-            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key)
+            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key,
+                                        referer=odsay_referer)
             if route is not None and len(route.path) >= 2:
                 return {"path": route.path, "status": "real", "reason": "ODsay",
                         "minutes": route.total_time_sec / 60.0}
@@ -811,6 +812,7 @@ def render_result(conf: dict) -> None:
     routes: dict[tuple[str, str], dict] = {}
     settings = load_settings()
     odsay_key = read_api_key("ODSAY_API_KEY")
+    odsay_referer = read_api_key("ODSAY_REFERER")
     tmap_key = read_api_key("TMAP_APP_KEY")
     if settings.has_kakao_key or odsay_key or tmap_key:
         with st.spinner("실제 동선 조회 중..."):
@@ -819,7 +821,8 @@ def render_result(conf: dict) -> None:
                     routes[(m.key, dst.key)] = fetch_real_route(
                         float(r_sel["lat"]), float(r_sel["lon"]),
                         float(dst.lat), float(dst.lon), dst.mode,
-                        settings.kakao_rest_api_key, odsay_key, tmap_key)
+                        settings.kakao_rest_api_key, odsay_key, tmap_key,
+                        odsay_referer)
 
     # 카카오 JS 키가 있으면 카카오맵, 없으면 Leaflet(OSM)을 사용한다.
     # 어느 쪽이든 왼쪽 추천·점수 오버레이 UI는 동일하다.

@@ -84,15 +84,23 @@ def _extract_path(path_obj: dict,
 
 def transit_route(origin_lat: float, origin_lon: float,
                   dest_lat: float, dest_lon: float,
-                  api_key: str, timeout: int = DEFAULT_TIMEOUT) -> TransitRoute | None:
-    """대중교통 최적 경로 1건. 경로가 없으면 None, 호출 실패는 OdsayError."""
+                  api_key: str, timeout: int = DEFAULT_TIMEOUT,
+                  referer: str = "") -> TransitRoute | None:
+    """대중교통 최적 경로 1건. 경로가 없으면 None, 호출 실패는 OdsayError.
+
+    referer: ODsay 마이페이지에 "URI" 플랫폼으로 등록한 서비스 도메인. 이 키가
+    서버(IP) 플랫폼이 아니라 URI 플랫폼으로만 등록돼 있으면, ODsay 는 요청의
+    Referer 헤더가 등록된 도메인과 일치하는지로 인증한다 — 안 보내면 서버 사이드
+    호출(requests) 은 Referer 가 비어 있어 500 ApiKeyAuthFailed 로 거부된다.
+    """
     params = {
         "apiKey": normalize_key(api_key),
         "SX": origin_lon, "SY": origin_lat,
         "EX": dest_lon, "EY": dest_lat,
         "SearchPathType": 0,
     }
-    resp = requests.get(SEARCH_PATH_URL, params=params, timeout=timeout)
+    headers = {"Referer": referer} if referer else None
+    resp = requests.get(SEARCH_PATH_URL, params=params, headers=headers, timeout=timeout)
     if resp.status_code != 200:
         raise OdsayError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
