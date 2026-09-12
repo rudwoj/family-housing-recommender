@@ -59,25 +59,22 @@ PRESETS = {
 }
 
 
-def ensure_defaults():
-    """
-    위젯 기본값 보증.
-    st.rerun() 직후에는 아직 렌더링되지 않은 위젯의 상태가 정리될 수 있으므로
-    매 실행마다 setdefault 로 복구한다(값이 이미 있으면 사용자 설정을 보존).
-    """
-    d = {"alpha": 0.5}
-    for m in members:
-        d[f"active__{m.key}"] = True
-        d[f"prio__{m.key}"] = float(m.priority)
-        for f in m.features:
-            d[f"w__{m.key}__{f.key}"] = f.default_weight
-    for f in COMMON_FEATURES:
-        d[f"wc__{f.key}"] = f.default_weight
-    for k_, v_ in d.items():
-        st.session_state.setdefault(k_, v_)
+# 프리셋은 위젯 키가 아니라 별도 상태에 보관하고, 위젯에는 value= 로 주입한다.
+# (위젯 키에 session_state 를 미리 써두는 방식은 세션 재연결 시 프론트엔드가 보낸
+#  위젯 값에 덮어써져 기본값이 무너진다 — 체크박스가 False 로 떨어지는 문제.)
+if "preset" not in st.session_state:
+    st.session_state.preset = {"alpha": 0.5, "prio": {m.key: float(m.priority) for m in members}}
+    st.session_state.preset_id = 0
 
 
-ensure_defaults()
+def apply_preset(pval: dict) -> None:
+    st.session_state.preset = {"alpha": pval["alpha"], "prio": dict(pval["prio"])}
+    st.session_state.preset_id += 1
+    st.rerun()
+
+
+PRESET = st.session_state.preset
+PID = st.session_state.preset_id
 
 # --------------------------------------------------------------------------- #
 # 사이드바
@@ -90,11 +87,7 @@ sb.markdown("**빠른 프리셋**")
 pcols = sb.columns(2)
 for i, (pname, pval) in enumerate(PRESETS.items()):
     if pcols[i % 2].button(pname, use_container_width=True):
-        st.session_state.alpha = pval["alpha"]
-        for k, v in pval["prio"].items():
-            if f"prio__{k}" in st.session_state:
-                st.session_state[f"prio__{k}"] = v
-        st.rerun()
+        apply_preset(pval)
 
 sb.divider()
 
@@ -111,7 +104,8 @@ allowed_gu = sb.multiselect("지역 한정 (미선택 = 전체)", sorted(listing
 # --- ② 공통 vs 개별 균형 --- #
 sb.divider()
 sb.subheader("② 무엇을 더 중요하게?")
-alpha = sb.slider("🏠 집 자체 ←→ 🚶 생활 동선", 0.0, 1.0, key="alpha", step=0.05,
+alpha = sb.slider("🏠 집 자체 ←→ 🚶 생활 동선", 0.0, 1.0,
+                  value=float(PRESET["alpha"]), key=f"alpha__{PID}", step=0.05,
                   help="1.0 에 가까울수록 주택의 물리·환경 조건, 0.0 에 가까울수록 구성원 동선을 우선합니다.")
 sb.caption(f"공통 피처 비중 **{alpha:.0%}** · 개별 동선 비중 **{1 - alpha:.0%}**")
 
@@ -124,12 +118,15 @@ use_satisficing = sb.toggle("만족 임계값 사용", value=True,
 
 for m in members:
     with sb.expander(f"{m.name} · {m.anchor_label}", expanded=(m.key == "child")):
-        m.active = st.checkbox("추천에 반영", key=f"active__{m.key}")
-        member_priority[m.key] = st.slider("가족 내 발언권 $P_i$", 0.0, 3.0,
-                                           key=f"prio__{m.key}", step=0.1)
+        m.active = st.checkbox("추천에 반영", value=True, key=f"active__{m.key}")
+        member_priority[m.key] = st.slider(
+            "가족 내 발언권 $P_i$", 0.0, 3.0,
+            value=float(PRESET["prio"].get(m.key, m.priority)),
+            key=f"prio__{m.key}__{PID}", step=0.1)
         w = {}
         for f in m.features:
             w[f.key] = st.slider(f"{f.label} ({f.unit})", 0.0, 2.0,
+                                 value=float(f.default_weight),
                                  key=f"w__{m.key}__{f.key}", step=0.1)
             if f.hard_filter == "max":
                 lo, hi = float(individual[m.column(f.key)].min()), float(individual[m.column(f.key)].max())
@@ -151,6 +148,7 @@ common_weights = {}
 with sb.expander("공통 피처 상세 조정", expanded=False):
     for f in COMMON_FEATURES:
         common_weights[f.key] = st.slider(f"{f.label} ({f.unit})", 0.0, 2.0,
+                                          value=float(f.default_weight),
                                           key=f"wc__{f.key}", step=0.1)
 
 sb.divider()
