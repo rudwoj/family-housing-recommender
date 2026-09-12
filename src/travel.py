@@ -123,7 +123,7 @@ class ApiTravelProvider(TravelProvider):
     #: 대중교통까지 켜면 호출 수가 배로 늘어 순차 호출은 너무 느리다.
     MAX_WORKERS = 6
 
-    def __init__(self, fallback: TravelProvider | None = None, timeout: float = 6.0):
+    def __init__(self, fallback: TravelProvider | None = None, timeout: float = 15.0):
         self.fallback = fallback or EstimatedTravelProvider()
         self.timeout = timeout
         self.kakao_key = _secret("KAKAO_REST_API_KEY")
@@ -171,11 +171,15 @@ class ApiTravelProvider(TravelProvider):
         from .data_sources import kakao as kakao_api
 
         if mode == "drive":
-            route = kakao_api.car_directions(la, lo, dest.lat, dest.lon, self.kakao_key)
+            route = kakao_api.car_directions(la, lo, dest.lat, dest.lon, self.kakao_key,
+                                             timeout=int(self.timeout))
             return route.duration_sec / 60.0 if route else None
 
         if self.kakao_key:
-            route = kakao_api.transit_route(la, lo, dest.lat, dest.lon, self.kakao_key)
+            # 대중교통 응답은 경로 수십 개 좌표까지 실려와 크다. 배포 환경의 느린
+            # 네트워크에서 기본 8초로는 타임아웃이 나 조용히 추정치로 떨어졌었다.
+            route = kakao_api.transit_route(la, lo, dest.lat, dest.lon, self.kakao_key,
+                                            timeout=int(self.timeout))
             if route is not None:
                 return route.total_time_sec / 60.0
             if not self.odsay_key:
