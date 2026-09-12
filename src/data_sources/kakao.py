@@ -129,6 +129,21 @@ def search_keyword_nearest(lat: float, lon: float, keyword: str, api_key: str,
     return _nearest_from_documents(data.get("documents", []))
 
 
+def search_keyword_places(query: str, api_key: str, size: int = 7) -> list[dict]:
+    """키워드 장소 검색 — 사용자가 목적지를 고를 수 있도록 상위 size건을 돌려준다.
+
+    응답의 x = 경도(lon), y = 위도(lat) 이므로 여기서 lat/lon 으로 바로잡아 반환한다.
+    """
+    data = _get(KEYWORD_SEARCH_URL, api_key, {"query": query, "size": max(1, min(size, 15))})
+    return [{
+        "place_name": d.get("place_name", ""),
+        "address_name": d.get("address_name", ""),
+        "road_address_name": d.get("road_address_name", ""),
+        "latitude": float(d["y"]),
+        "longitude": float(d["x"]),
+    } for d in data.get("documents", [])]
+
+
 def _vertexes_to_latlon(vertexes: list[float]) -> list[tuple[float, float]]:
     """[x1, y1, x2, y2, ...] (경도, 위도 평탄화) -> [(위도, 경도), ...]."""
     return [(vertexes[i + 1], vertexes[i]) for i in range(0, len(vertexes) - 1, 2)]
