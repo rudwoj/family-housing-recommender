@@ -89,7 +89,8 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
 
 
 @st.cache_data(show_spinner="이동 시간 계산 중...")
-def compute_travel(signature: tuple, use_api: bool) -> pd.DataFrame:
+def compute_travel(signature: tuple, use_api: bool) -> tuple[pd.DataFrame, dict]:
+    """이동 시간표와 함께, 어떤 이동수단이 왜 추정치로 떨어졌는지도 돌려준다."""
     listings = load_listings()
     members = [Member(key=mk, name=mk, color="#000",
                       destinations=[Destination(key=dk, label=dk, lat=la, lon=lo, mode=mo)])
@@ -98,7 +99,7 @@ def compute_travel(signature: tuple, use_api: bool) -> pd.DataFrame:
     out = travel_matrix(listings, [members[0]], provider)
     for m in members[1:]:
         out = out.merge(travel_matrix(listings, [m], provider), on="listing_id")
-    return out
+    return out, dict(getattr(provider, "last_error", {}))
 
 
 if not os.path.exists(os.path.join(DATA, "listings.csv")):
@@ -333,7 +334,7 @@ def render_result(conf: dict) -> None:
     members: list[Member] = conf["members"]
     signature = tuple(sorted((m.key, d.key, round(d.lat, 5), round(d.lon, 5), d.mode)
                              for m in members for d in m.enabled_destinations))
-    travel = compute_travel(signature, conf["use_api"])
+    travel, travel_fallbacks = compute_travel(signature, conf["use_api"])
 
     engine = FamilyHousingRecommender(listings, travel, members,
                                       scaler=conf["scaler"], clip_q=conf["clip_q"])
@@ -506,6 +507,14 @@ def render_result(conf: dict) -> None:
                             "대중교통 경로 조회에 실패했습니다. 디벨로퍼스 콘솔에서 "
                             "[내 애플리케이션 > 제품 설정 > 카카오맵] 사용 설정을 확인하세요. "
                             "자동차 길찾기(카카오모빌리티)와 권한이 다릅니다.")
+
+                # 지도 선과 별개로, 이동 "시간" 이 추정치로 떨어진 이동수단도 알린다.
+                # (도보는 API 자체가 없으니 굳이 경고하지 않는다)
+                api_notes = {m: r for m, r in travel_fallbacks.items() if m != "walk"}
+                if api_notes:
+                    st.info("이동 **시간**을 실제 API 로 못 받아 추정치로 계산한 이동수단: "
+                            + " / ".join(f"{TRAVEL_MODES.get(m, m)} — {r}"
+                                         for m, r in api_notes.items()))
 
         mrow = top.loc[map_sel]
         for m in active:
