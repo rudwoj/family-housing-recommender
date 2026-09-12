@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.features import derive_common_features, pareto_mask
 from src.model import (Constraint, FamilyHousingRecommender, HardConstraints, WeightConfig)
 from src.preprocess import UtilityPipeline, utility
-from src.schema import COMMON_FEATURES, FEATURE_BY_KEY, Member, assert_no_price_columns
+from src.schema import (COMMON_FEATURES, FEATURE_BY_KEY, Member,
+                        assert_no_price_columns, make_default_members)
 
 DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
@@ -19,8 +20,7 @@ DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 def load():
     listings = derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
     travel = pd.read_csv(os.path.join(DATA, "travel_times.csv"))
-    members = [Member.from_dict(d) for d in
-               json.load(open(os.path.join(DATA, "members.json"), encoding="utf-8"))]
+    members = make_default_members()          # 기본 4명 (이름은 앱에서 사용자가 입력)
     return listings, travel, members
 
 
@@ -114,14 +114,14 @@ def test_conflict_resolution():
     eng = FamilyHousingRecommender(listings, travel, members)
 
     cfg = WeightConfig(alpha=0.35,
-                       member_priority={"dad": 1.0, "mom": 1.0, "child": 1.0})
+                       member_priority={m.key: 1.0 for m in members})
     rec = eng.recommend(cfg, base_constraints(), k=10, member_top_n=5)
 
     for m in eng.active_members:
         col = f"sat__{m.key}"
         assert rec.top[col].min() >= 55.0 - 1e-6, f"{m.name} 하한선 위반"
     assert rec.scored["pareto"].sum() >= 1
-    assert set(rec.member_tops) == {"dad", "mom", "child"}
+    assert set(rec.member_tops) == {m.key for m in eng.active_members}
     print(f"✅ 하한선 55점 적용: 전체 {len(rec.scored)}건 → 통과 {rec.diagnostics['eligible']}건")
     print(f"   구성원별 Top5 교집합: {rec.intersection or '없음(트레이드오프 존재)'}")
     return rec
@@ -130,7 +130,7 @@ def test_conflict_resolution():
 def test_pipeline():
     listings, travel, members = load()
     eng = FamilyHousingRecommender(listings, travel, members)
-    cfg = WeightConfig(alpha=0.45, satisficing={"dad__work__transit_min": 30.0})
+    cfg = WeightConfig(alpha=0.45, satisficing={"m1__dest1__transit_min": 30.0})
     rec = eng.recommend(cfg, base_constraints(), k=10, n_clusters=3)
 
     assert abs(rec.weights.sum() - 1.0) < 1e-9
@@ -146,8 +146,9 @@ def test_pipeline():
           f" (공통 {d['common_features']} + 개별 {d['individual_features']})")
     print(f"   클리핑 {d['clip_q']:.0%}: {len(d['clip_report'])}개 피처에서 이상치 절단, "
           f"KNNImputer 보정 {d['missing_cells']}셀")
-    cols = ["name", "gu", "rank", "fit_score", "sat__dad", "sat__mom", "sat__child",
-            "sat_gap", "travel_mean_min", "cluster"]
+    cols = (["name", "gu", "rank", "fit_score"]
+            + [f"sat__{m.key}" for m in eng.active_members]
+            + ["sat_gap", "travel_mean_min", "cluster"])
     print(rec.top[cols].head(5).to_string())
     return rec
 
