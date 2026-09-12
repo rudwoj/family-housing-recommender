@@ -21,6 +21,11 @@ from .schema import TRAVEL_MODES, Member
 SDK_URL = "//dapi.kakao.com/v2/maps/sdk.js"
 
 
+def _far(a, b, tol: float = 1e-5) -> bool:
+    """두 좌표가 사실상 같은 지점인지 (약 1m 이내면 같다고 본다)."""
+    return abs(a[0] - b[0]) > tol or abs(a[1] - b[1]) > tol
+
+
 def _payload(top, members: list[Member], selected_id: str, routes: dict) -> dict:
     sel = selected_id if selected_id in top.index else top.index[0]
     r = top.loc[sel]
@@ -37,9 +42,21 @@ def _payload(top, members: list[Member], selected_id: str, routes: dict) -> dict
             info = routes.get((m.key, d.key)) or {}
             path = [list(p) for p in info.get("path", [])]
             real = len(path) >= 2
+            origin = [float(r["lat"]), float(r["lon"])]
+            target = [float(d.lat), float(d.lon)]
             if not real:                       # 실경로가 없으면 출발-도착 직선
-                path = [[float(r["lat"]), float(r["lon"])], [float(d.lat), float(d.lon)]]
-            minutes = r.get(d.column(m.key))
+                path = [origin, target]
+            else:
+                # 대중교통 경로는 가장 가까운 정류장에서 시작해 매물 마커와 수백 m
+                # 떨어져 끊겨 보인다. 양 끝을 매물/목적지에 붙여 선이 닿게 한다.
+                if _far(path[0], origin):
+                    path.insert(0, origin)
+                if _far(path[-1], target):
+                    path.append(target)
+            # 실제 경로를 받아왔으면 그때의 소요시간이 더 정확하다.
+            minutes = info.get("minutes")
+            if minutes is None:
+                minutes = r.get(d.column(m.key))
             lines.append({
                 "member": m.name, "dest": d.label, "color": m.color,
                 "mode": TRAVEL_MODES.get(d.mode, d.mode), "real": real, "path": path,
