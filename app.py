@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 
 import pandas as pd
@@ -19,8 +18,9 @@ from src import viz
 from src.features import derive_common_features
 from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
                        HardConstraints, WeightConfig, label_of)
-from src.schema import (AUX_COLUMNS, COMMON_FEATURES, ORIENTATION_SCORE, TRAVEL_MODES,
-                        Destination, Member)
+from src.schema import (AUX_COLUMNS, COMMON_FEATURES, DEFAULT_MEMBER_COUNT, MAX_MEMBERS,
+                        ORIENTATION_SCORE, TRAVEL_MODES, Destination, Member,
+                        make_default_members)
 from src.travel import ApiTravelProvider, EstimatedTravelProvider, travel_matrix
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -49,12 +49,6 @@ def load_listings() -> pd.DataFrame:
     return derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
 
 
-@st.cache_data(show_spinner=False)
-def load_member_config() -> list[dict]:
-    with open(os.path.join(DATA, "members.json"), encoding="utf-8") as f:
-        return json.load(f)
-
-
 @st.cache_data(show_spinner="이동 시간 계산 중...")
 def compute_travel(signature: tuple, use_api: bool) -> pd.DataFrame:
     """목적지 구성이 바뀔 때만 이동 시간을 다시 계산한다."""
@@ -75,7 +69,6 @@ if not os.path.exists(os.path.join(DATA, "listings.csv")):
     st.stop()
 
 listings = load_listings()
-member_cfg = load_member_config()
 
 # --------------------------------------------------------------------------- #
 # 사이드바 ① 구성원 · 목적지
@@ -91,45 +84,58 @@ if use_api and not ApiTravelProvider().available:
     sb.warning("API 키가 없어 거리 기반 추정으로 동작합니다.")
 
 sb.subheader("① 구성원과 목적지")
+n_members = sb.number_input("구성원 수", min_value=1, max_value=MAX_MEMBERS,
+                            value=DEFAULT_MEMBER_COUNT, step=1, key="n_members",
+                            help="구성원 이름은 각 항목에서 직접 입력할 수 있습니다.")
+defaults = make_default_members(int(n_members))
+
 members: list[Member] = []
-for cfg in member_cfg:
-    with sb.expander(f"{cfg['name']}", expanded=(cfg["key"] == "child")):
-        active = st.checkbox("추천에 반영", value=True, key=f"active__{cfg['key']}")
+for base in defaults:
+    mk = base.key
+    display = st.session_state.get(f"mname__{mk}", base.name) or base.name
+    with sb.expander(display, expanded=(mk == "m1")):
+        name = st.text_input("이름", value=base.name, key=f"mname__{mk}",
+                             placeholder="예: 아빠, 엄마, 첫째")
+        name = name.strip() or base.name
+        active = st.checkbox("추천에 반영", value=True, key=f"active__{mk}")
         priority = st.slider("가족 내 발언권 $P_i$", 0.0, 3.0, value=1.0, step=0.1,
-                             key=f"prio__{cfg['key']}")
+                             key=f"prio__{mk}")
         floor = st.slider("만족도 하한선 (이 밑이면 후보에서 제외)", 0, 90, value=0, step=5,
-                          key=f"floor__{cfg['key']}",
+                          key=f"floor__{mk}",
                           help="상충하는 선호가 '어중간한 타협안'으로 수렴하는 것을 막습니다.")
+
         dests: list[Destination] = []
-        for d in cfg["destinations"]:
-            st.markdown(f"**{d['label']}**")
+        for base_d in base.destinations:
+            dk = base_d.key
+            st.markdown("---")
+            enabled = st.checkbox(f"목적지 사용 ({base_d.label})", value=base_d.enabled,
+                                  key=f"den__{mk}__{dk}")
+            label = st.text_input("목적지 이름", value=base_d.label, key=f"dlabel__{mk}__{dk}")
+            label = label.strip() or base_d.label
             c1, c2 = st.columns([1, 1])
-            enabled = c1.checkbox("사용", value=d.get("enabled", True),
-                                  key=f"den__{cfg['key']}__{d['key']}")
-            mode = c2.selectbox("이동수단", list(TRAVEL_MODES),
-                                index=list(TRAVEL_MODES).index(d.get("mode", "transit")),
+            mode = c1.selectbox("이동수단", list(TRAVEL_MODES),
+                                index=list(TRAVEL_MODES).index(base_d.mode),
                                 format_func=lambda k: TRAVEL_MODES[k],
-                                key=f"dmode__{cfg['key']}__{d['key']}")
-            place_names = ["(직접 입력)"] + list(PLACE_PRESETS)
-            preset = st.selectbox("위치", place_names, index=0,
-                                  key=f"dplace__{cfg['key']}__{d['key']}")
-            if preset == "(직접 입력)":
+                                key=f"dmode__{mk}__{dk}")
+            weight = c2.slider("중요도", 0.0, 2.0, value=float(base_d.weight), step=0.1,
+                               key=f"dw__{mk}__{dk}")
+            preset = st.selectbox("위치", ["(좌표 직접 입력)"] + list(PLACE_PRESETS), index=0,
+                                  key=f"dplace__{mk}__{dk}")
+            if preset == "(좌표 직접 입력)":
                 c3, c4 = st.columns(2)
-                lat = c3.number_input("위도", value=float(d["lat"]), format="%.4f",
-                                      key=f"dlat__{cfg['key']}__{d['key']}")
-                lon = c4.number_input("경도", value=float(d["lon"]), format="%.4f",
-                                      key=f"dlon__{cfg['key']}__{d['key']}")
+                lat = c3.number_input("위도", value=float(base_d.lat), format="%.4f",
+                                      key=f"dlat__{mk}__{dk}")
+                lon = c4.number_input("경도", value=float(base_d.lon), format="%.4f",
+                                      key=f"dlon__{mk}__{dk}")
             else:
                 lat, lon = PLACE_PRESETS[preset]
                 st.caption(f"{preset} ({lat:.4f}, {lon:.4f})")
-            weight = st.slider("중요도", 0.0, 2.0, value=float(d.get("weight", 1.0)), step=0.1,
-                               key=f"dw__{cfg['key']}__{d['key']}")
             cap = st.number_input("⛔ 이동시간 상한 (분, 0=제한 없음)", min_value=0, value=0, step=5,
-                                  key=f"dcap__{cfg['key']}__{d['key']}")
-            dests.append(Destination(d["key"], d["label"], lat, lon, mode, weight, enabled))
-            st.session_state[f"cap__{cfg['key']}__{d['key']}"] = cap
-            st.divider()
-        m = Member(cfg["key"], cfg["name"], cfg["color"], dests, priority, float(floor))
+                                  key=f"dcap__{mk}__{dk}")
+            st.session_state[f"cap__{mk}__{dk}"] = cap
+            dests.append(Destination(dk, label, lat, lon, mode, weight, enabled))
+
+        m = Member(mk, name, base.color, dests, priority, float(floor))
         m.active = active
         members.append(m)
 
