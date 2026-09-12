@@ -223,11 +223,25 @@ def cluster_profile_fig(profile: pd.DataFrame) -> go.Figure:
 # --------------------------------------------------------------------------- #
 # 7. 지도 (구성원 동선 마커 + 연결선)
 # --------------------------------------------------------------------------- #
-def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None = None):
-    """추천 매물 위치 + 선택 매물에서 각 구성원 목적지까지의 동선."""
+def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None = None,
+              routes: dict[tuple[str, str], dict] | None = None):
+    """추천 매물 위치 + 선택 매물에서 각 구성원 목적지까지의 동선.
+
+    routes: {(member.key, destination.key): {"path": [(lat, lon), ...], "mode": "drive"|"transit"}}
+    카카오 실제 길찾기로 얻은 경로. 없거나 좌표가 2점 미만이면 출발-도착 직선으로 폴백한다
+    (API 미설정/실패를 이렇게 시각적으로 구분해서 보여준다).
+    """
     center = [float(top["lat"].mean()), float(top["lon"].mean())]
     sel = selected_id if selected_id in top.index else top.index[0]
     r = top.loc[sel]
+    routes = routes or {}
+
+    def route_for(mem, d):
+        info = routes.get((mem.key, d.key)) or {}
+        path = info.get("path") or []
+        if len(path) >= 2:
+            return path, True
+        return [(r["lat"], r["lon"]), (d.lat, d.lon)], False
 
     if HAS_FOLIUM:
         m = folium.Map(location=center, zoom_start=11, tiles="cartodbpositron")
@@ -235,9 +249,14 @@ def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None 
             for d in mem.enabled_destinations:
                 folium.Marker([d.lat, d.lon], tooltip=f"{mem.name} · {d.label}",
                               icon=folium.Icon(color="gray", icon="flag", prefix="fa")).add_to(m)
-                folium.PolyLine([[r["lat"], r["lon"]], [d.lat, d.lon]],
-                                color=mem.color, weight=3, opacity=0.75,
-                                tooltip=f"{mem.name} → {d.label}").add_to(m)
+                path, is_real = route_for(mem, d)
+                folium.PolyLine([list(p) for p in path],
+                                color=mem.color, weight=4 if is_real else 3,
+                                opacity=0.8 if is_real else 0.5,
+                                dashArray=None if is_real else "6,6",
+                                tooltip=f"{mem.name} → {d.label}"
+                                        + ("" if is_real else " (실제 경로 조회 실패 · 직선 추정)")
+                                ).add_to(m)
         for lid, row in top.iterrows():
             is_sel = lid == sel
             folium.CircleMarker([row["lat"], row["lon"]], radius=9 if is_sel else 6,
@@ -264,12 +283,16 @@ def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None 
     for mem in members:
         for d in mem.enabled_destinations:
             minutes = r.get(d.column(mem.key), float("nan"))
+            path, is_real = route_for(mem, d)
+            lats = [p[0] for p in path]
+            lons = [p[1] for p in path]
+            tag = "" if is_real else " · 직선 추정"
             fig.add_trace(MapTrace(
-                lat=[r["lat"], d.lat], lon=[r["lon"], d.lon], mode="lines+markers",
-                line=dict(width=3, color=mem.color),
-                marker=dict(size=[0, 14], color=mem.color),
-                name=f"{mem.name} → {d.label} ({TRAVEL_MODES[d.mode]} {minutes:.0f}분)",
-                hovertemplate=f"{mem.name} → {d.label}<extra></extra>"))
+                lat=lats, lon=lons, mode="lines+markers",
+                line=dict(width=4 if is_real else 3, color=mem.color),
+                marker=dict(size=[0] * (len(path) - 1) + [14], color=mem.color),
+                name=f"{mem.name} → {d.label} ({TRAVEL_MODES[d.mode]} {minutes:.0f}분{tag})",
+                hovertemplate=f"{mem.name} → {d.label}{tag}<extra></extra>"))
 
     fig.update_layout(**{MAP_LAYOUT_KEY: dict(style=BASEMAP_STYLE,
                                               center=dict(lat=center[0], lon=center[1]), zoom=10)},

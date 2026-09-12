@@ -4,3 +4,9 @@ __pycache__/
 .DS_Store
 .venv/
 venv/
+
+# 실제 API 키가 들어가는 환경변수 파일 (커밋 금지 — .env.example 참고)
+.env
+
+# 외부 API 원시 응답 캐시/디버그 덤프
+data/raw_cache/

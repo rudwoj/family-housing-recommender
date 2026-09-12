@@ -21,6 +21,8 @@ import pandas as pd
 import streamlit as st
 
 from src import viz
+from src.data_sources import kakao
+from src.data_sources.config import load_settings
 from src.features import derive_common_features
 from src.model import (CategoryConstraint, Constraint, FamilyHousingRecommender,
                        HardConstraints, WeightConfig, label_of)
@@ -54,6 +56,25 @@ SORT_MODES = ["종합 적합도", "최약자 우선 (Maximin)", "형평성 우�
 @st.cache_data(show_spinner=False)
 def load_listings() -> pd.DataFrame:
     return derive_common_features(pd.read_csv(os.path.join(DATA, "listings.csv")))
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
+                     mode: str, api_key: str) -> dict:
+    """카카오 API로 실제 이동 경로 좌표를 가져온다. 도보는 전용 길찾기 API가 없어
+    직선으로 남긴다. 실패하면 호출부가 직선 폴백으로 표시할 수 있게 빈 경로를 반환한다."""
+    if not api_key or mode == "walk":
+        return {"path": []}
+    try:
+        if mode == "drive":
+            route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key)
+        else:  # transit
+            route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key)
+        if route is not None and len(route.path) >= 2:
+            return {"path": route.path}
+    except kakao.KakaoError:
+        pass
+    return {"path": []}
 
 
 @st.cache_data(show_spinner="이동 시간 계산 중...")
@@ -413,13 +434,29 @@ def render_result(conf: dict) -> None:
         # 후보가 바뀌면 이전 선택이 목록에 없을 수 있으므로 key 를 두지 않는다.
         map_sel = st.selectbox("동선을 볼 매물", list(top.index),
                                format_func=lambda i: labels[i])
-        kind, obj = viz.build_map(top, active, map_sel)
+        r_sel = top.loc[map_sel]
+
+        routes: dict[tuple[str, str], dict] = {}
+        settings = load_settings()
+        if conf["use_api"] and settings.has_kakao_key:
+            with st.spinner("카카오 API로 실제 동선 조회 중..."):
+                for m in active:
+                    for dst in m.enabled_destinations:
+                        routes[(m.key, dst.key)] = fetch_real_route(
+                            float(r_sel["lat"]), float(r_sel["lon"]),
+                            float(dst.lat), float(dst.lon), dst.mode,
+                            settings.kakao_rest_api_key)
+
+        kind, obj = viz.build_map(top, active, map_sel, routes=routes)
         if kind == "folium" and HAS_ST_FOLIUM:
             st_folium(obj, height=560, use_container_width=True)
         elif kind == "folium":
             st.components.v1.html(obj._repr_html_(), height=560)
         else:
             st.plotly_chart(obj, use_container_width=True, key="map_plotly")
+        if conf["use_api"]:
+            st.caption("실선 = 카카오 실제 경로(운전/대중교통) · 점선 = 조회 실패 시 직선 추정 "
+                       "(도보 목적지는 전용 경로 API가 없어 항상 직선입니다)")
 
         mrow = top.loc[map_sel]
         for m in active:
