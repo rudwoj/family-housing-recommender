@@ -139,3 +139,33 @@ def kakao_map_html(top, members: list[Member], selected_id: str,
 }})();
 </script>
 """
+
+# ---------------------------------------------------------------------------
+# Streamlit 커스텀 컴포넌트로 렌더링
+# ---------------------------------------------------------------------------
+# components.html 은 about:srcdoc 문서를 쓰기 때문에 카카오 SDK 가 프로토콜을
+# http 로 오판해 mixed-content 에 걸린다(자세한 이유는 kakao_frontend/index.html).
+# 커스텀 컴포넌트는 /component/<name>/index.html 실제 URL 로 서빙되므로
+# location.protocol 이 https 가 되고 Referer 도 등록 도메인으로 나간다.
+
+import os
+
+_FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "kakao_frontend")
+_component = None
+
+
+def _get_component():
+    global _component
+    if _component is None:
+        import streamlit.components.v1 as components
+        _component = components.declare_component("kakao_map",
+                                                  path=_FRONTEND_DIR)
+    return _component
+
+
+def render_kakao_map(top, members: list[Member], selected_id: str,
+                     routes: dict | None, js_key: str,
+                     height: int = 560, key: str | None = None) -> None:
+    html = kakao_map_html(top, members, selected_id, routes, js_key, height)
+    _get_component()(html=html, height=height + 20, key=key, default=None)
