@@ -224,15 +224,12 @@ def render_setup() -> None:
 
     # ---------------- ① 구성원과 목적지 ---------------- #
     st.subheader("① 구성원과 목적지")
-    head = st.columns([1, 3])
-    n_members = head[0].number_input("구성원 수", min_value=1, max_value=MAX_MEMBERS,
-                                     value=int(D("n_members", DEFAULT_MEMBER_COUNT)),
-                                     step=1, key="n_members")
-    use_api = head[1].toggle(
-        "경로 API 사용", value=bool(D("use_api", False)), key="use_api",
-        help="KAKAO_REST_API_KEY / ODSAY_API_KEY 환경변수가 있을 때만 동작하며, "
-             "실패하면 거리 기반 추정으로 자동 폴백합니다.")
-    if use_api and not ApiTravelProvider().available:
+    n_members = st.number_input("구성원 수", min_value=1, max_value=MAX_MEMBERS,
+                                value=int(D("n_members", DEFAULT_MEMBER_COUNT)),
+                                step=1, key="n_members")
+    # 경로 API는 항상 사용한다 — 키가 없거나 호출이 실패하면 거리 기반 추정으로 자동 폴백한다.
+    use_api = True
+    if not ApiTravelProvider().available:
         st.warning("API 키가 없어 거리 기반 추정으로 동작합니다.")
 
     # 저장된 구성원이 있으면 그것을 기본값으로 (없거나 인원이 늘면 템플릿으로 채운다)
