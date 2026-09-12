@@ -16,7 +16,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from .model import label_of
-from .schema import COMMON_KEYS, Member
+from .schema import COMMON_KEYS, TRAVEL_MODES, Member
 
 try:  # folium 은 선택 의존성
     import folium
@@ -69,18 +69,43 @@ def member_radar(rec, listing_ids: list[str], members: list[Member]) -> go.Figur
 # 2. 피처 프로파일 레이더 (스케일 공간, 이상점 대비)
 # --------------------------------------------------------------------------- #
 def feature_radar(rec, listing_ids: list[str], columns: list[str], title: str) -> go.Figure:
+    """만족도(효용) 공간 프로파일. 이상점은 모든 축이 1 이다."""
     axes = [label_of(c) for c in columns]
     fig = go.Figure()
-    ideal = [float(rec.ideal_scaled[c]) for c in columns]
-    fig.add_trace(go.Scatterpolar(r=ideal + ideal[:1], theta=axes + axes[:1],
-                                  name="가족 이상점", line=dict(dash="dot", color="#111827"),
-                                  fill="toself", opacity=0.12))
+    fig.add_trace(go.Scatterpolar(
+        r=[1.0] * (len(columns) + 1), theta=axes + axes[:1], name="가족 이상점",
+        line=dict(dash="dot", color="#111827"), fill="toself", opacity=0.10))
     for lid in listing_ids:
-        v = [float(rec.scaled.loc[lid, c]) for c in columns]
+        v = [float(rec.utility.loc[lid, c]) for c in columns]
         fig.add_trace(go.Scatterpolar(r=v + v[:1], theta=axes + axes[:1], fill="toself",
-                                      opacity=0.45, name=str(rec.scored.loc[lid, "name"])))
+                                      opacity=0.45, name=str(rec.scored.loc[lid, "name"]),
+                                      hovertemplate="%{theta}: 만족도 %{r:.2f}<extra></extra>"))
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
                       title=title, legend=dict(orientation="h", y=-0.12), **LAYOUT)
+    return fig
+
+
+def utility_curve_fig() -> go.Figure:
+    """비선형 효용 곡선 설명용 차트."""
+    import numpy as np
+
+    from .preprocess import utility
+    from .schema import FEATURE_BY_KEY
+
+    t = np.linspace(0, 1, 101)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=t, y=1 - t, name="선형 (기존 방식)",
+                             line=dict(color="#94a3b8", dash="dash")))
+    f_time = FEATURE_BY_KEY["transit_walk_min"]
+    fig.add_trace(go.Scatter(x=t, y=utility(t, f_time), name="이동시간 (볼록 · 불만 가속)",
+                             line=dict(color="#dc2626", width=3)))
+    f_area = FEATURE_BY_KEY["area_m2"]
+    fig.add_trace(go.Scatter(x=t, y=utility(t, f_area), name="면적 (오목 · 체감 효용 감소)",
+                             line=dict(color="#2563eb", width=3)))
+    fig.update_layout(title="비선형 효용 변환 — 같은 1단위 변화라도 구간마다 체감이 다르다",
+                      xaxis=dict(title="정규화된 피처 위치 (0=최소, 1=최대)", **GRID),
+                      yaxis=dict(title="만족도", **GRID), height=380,
+                      legend=dict(orientation="h", y=-0.25), **LAYOUT)
     return fig
 
 
@@ -199,59 +224,53 @@ def cluster_profile_fig(profile: pd.DataFrame) -> go.Figure:
 # 7. 지도 (구성원 동선 마커 + 연결선)
 # --------------------------------------------------------------------------- #
 def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None = None):
-    """folium 이 있으면 folium.Map, 없으면 plotly Figure 를 반환한다."""
+    """추천 매물 위치 + 선택 매물에서 각 구성원 목적지까지의 동선."""
     center = [float(top["lat"].mean()), float(top["lon"].mean())]
     sel = selected_id if selected_id in top.index else top.index[0]
+    r = top.loc[sel]
 
     if HAS_FOLIUM:
         m = folium.Map(location=center, zoom_start=11, tiles="cartodbpositron")
-        for m_ in members:
-            if m_.anchor_lat is None:
-                continue
-            folium.Marker([m_.anchor_lat, m_.anchor_lon],
-                          tooltip=f"{m_.name} · {m_.anchor_label}",
-                          icon=folium.Icon(color="gray", icon="briefcase", prefix="fa")).add_to(m)
-        for lid, r in top.iterrows():
+        for mem in members:
+            for d in mem.enabled_destinations:
+                folium.Marker([d.lat, d.lon], tooltip=f"{mem.name} · {d.label}",
+                              icon=folium.Icon(color="gray", icon="flag", prefix="fa")).add_to(m)
+                folium.PolyLine([[r["lat"], r["lon"]], [d.lat, d.lon]],
+                                color=mem.color, weight=3, opacity=0.75,
+                                tooltip=f"{mem.name} → {d.label}").add_to(m)
+        for lid, row in top.iterrows():
             is_sel = lid == sel
-            folium.CircleMarker(
-                [r["lat"], r["lon"]], radius=9 if is_sel else 6,
-                color="#2563eb" if is_sel else "#94a3b8", fill=True,
-                fill_opacity=0.9 if is_sel else 0.6,
-                tooltip=f"{int(r['rank'])}위 · {r['name']} · {r['fit_score']}점").add_to(m)
-        r = top.loc[sel]
-        for m_ in members:
-            if m_.anchor_lat is None:
-                continue
-            folium.PolyLine([[r["lat"], r["lon"]], [m_.anchor_lat, m_.anchor_lon]],
-                            color=m_.color, weight=3, opacity=0.75,
-                            tooltip=f"{m_.name} 동선").add_to(m)
+            folium.CircleMarker([row["lat"], row["lon"]], radius=9 if is_sel else 6,
+                                color="#2563eb" if is_sel else "#94a3b8", fill=True,
+                                fill_opacity=0.9 if is_sel else 0.6,
+                                tooltip=f"{int(row['rank'])}위 · {row['name']}").add_to(m)
         return "folium", m
 
     fig = go.Figure()
-    # 지도 배경 위에서도 마커가 보이도록 흰색 헤일로를 먼저 깐다
-    fig.add_trace(MapTrace(
-        lat=top["lat"], lon=top["lon"], mode="markers",
-        marker=dict(size=[26 if i == sel else 20 for i in top.index], color="white"),
-        hoverinfo="skip", showlegend=False))
+    fig.add_trace(MapTrace(lat=top["lat"], lon=top["lon"], mode="markers",
+                           marker=dict(size=[26 if i == sel else 20 for i in top.index],
+                                       color="white"),
+                           hoverinfo="skip", showlegend=False))
     fig.add_trace(MapTrace(
         lat=top["lat"], lon=top["lon"], mode="markers+text",
         marker=dict(size=[22 if i == sel else 16 for i in top.index],
                     color=["#2563eb" if i == sel else "#475569" for i in top.index]),
-        text=[str(int(r)) for r in top["rank"]], textposition="middle center",
+        text=[str(int(v)) for v in top["rank"]], textposition="middle center",
         textfont=dict(color="white", size=10),
         customdata=np.stack([top["name"], top["fit_score"]], axis=-1),
         hovertemplate="%{customdata[0]}<br>종합 %{customdata[1]:.1f}점<extra></extra>",
         name="추천 매물"))
-    r = top.loc[sel]
-    for m_ in members:
-        if m_.anchor_lat is None:
-            continue
-        fig.add_trace(MapTrace(
-            lat=[r["lat"], m_.anchor_lat], lon=[r["lon"], m_.anchor_lon],
-            mode="lines+markers", line=dict(width=3, color=m_.color),
-            marker=dict(size=[0, 14], color=m_.color),
-            name=f"{m_.name} → {m_.anchor_label}",
-            hovertemplate=f"{m_.name} 동선<extra></extra>"))
+
+    for mem in members:
+        for d in mem.enabled_destinations:
+            minutes = r.get(d.column(mem.key), float("nan"))
+            fig.add_trace(MapTrace(
+                lat=[r["lat"], d.lat], lon=[r["lon"], d.lon], mode="lines+markers",
+                line=dict(width=3, color=mem.color),
+                marker=dict(size=[0, 14], color=mem.color),
+                name=f"{mem.name} → {d.label} ({TRAVEL_MODES[d.mode]} {minutes:.0f}분)",
+                hovertemplate=f"{mem.name} → {d.label}<extra></extra>"))
+
     fig.update_layout(**{MAP_LAYOUT_KEY: dict(style=BASEMAP_STYLE,
                                               center=dict(lat=center[0], lon=center[1]), zoom=10)},
                       margin=dict(l=0, r=0, t=30, b=0), height=560,
