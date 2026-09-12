@@ -20,7 +20,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-from src import viz
+from src import viz, viz_kakao
 from src.data_sources import kakao
 from src.data_sources.config import load_settings
 from src.features import derive_common_features
@@ -61,20 +61,30 @@ def load_listings() -> pd.DataFrame:
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
                      mode: str, api_key: str) -> dict:
-    """카카오 API로 실제 이동 경로 좌표를 가져온다. 도보는 전용 길찾기 API가 없어
-    직선으로 남긴다. 실패하면 호출부가 직선 폴백으로 표시할 수 있게 빈 경로를 반환한다."""
-    if not api_key or mode == "walk":
-        return {"path": []}
+    """
+    카카오 API로 실제 이동 경로 좌표를 가져온다.
+
+    반환: {"path": [...], "status": ..., "reason": ...}
+      real      실제 경로를 받았다
+      walk      도보는 카카오에 전용 길찾기 API가 없어 항상 직선이다
+      no_route  API는 응답했지만 경로가 없다
+      error     호출 실패 (권한/설정 문제일 가능성이 높다)
+    왜 직선으로 나오는지 화면에서 확인할 수 있도록 이유를 삼키지 않고 돌려준다.
+    """
+    if not api_key:
+        return {"path": [], "status": "no_key", "reason": "카카오 키 없음"}
+    if mode == "walk":
+        return {"path": [], "status": "walk", "reason": "도보 전용 길찾기 API 없음"}
     try:
         if mode == "drive":
             route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key)
-        else:  # transit
+        else:
             route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key)
         if route is not None and len(route.path) >= 2:
-            return {"path": route.path}
-    except kakao.KakaoError:
-        pass
-    return {"path": []}
+            return {"path": route.path, "status": "real", "reason": ""}
+        return {"path": [], "status": "no_route", "reason": "경로 결과 없음"}
+    except kakao.KakaoError as e:
+        return {"path": [], "status": "error", "reason": str(e)[:160]}
 
 
 @st.cache_data(show_spinner="이동 시간 계산 중...")
@@ -447,16 +457,40 @@ def render_result(conf: dict) -> None:
                             float(dst.lat), float(dst.lon), dst.mode,
                             settings.kakao_rest_api_key)
 
-        kind, obj = viz.build_map(top, active, map_sel, routes=routes)
-        if kind == "folium" and HAS_ST_FOLIUM:
-            st_folium(obj, height=560, use_container_width=True)
-        elif kind == "folium":
-            st.components.v1.html(obj._repr_html_(), height=560)
+        if settings.has_kakao_js_key:
+            st.components.v1.html(
+                viz_kakao.kakao_map_html(top, active, map_sel, routes,
+                                         settings.kakao_javascript_key),
+                height=580)
         else:
-            st.plotly_chart(obj, use_container_width=True, key="map_plotly")
-        if conf["use_api"]:
-            st.caption("실선 = 카카오 실제 경로(운전/대중교통) · 점선 = 조회 실패 시 직선 추정 "
-                       "(도보 목적지는 전용 경로 API가 없어 항상 직선입니다)")
+            kind, obj = viz.build_map(top, active, map_sel, routes=routes)
+            if kind == "folium" and HAS_ST_FOLIUM:
+                st_folium(obj, height=560, use_container_width=True)
+            elif kind == "folium":
+                st.components.v1.html(obj._repr_html_(), height=560)
+            else:
+                st.plotly_chart(obj, use_container_width=True, key="map_plotly")
+            st.caption("ℹ️ `KAKAO_JAVASCRIPT_KEY` 를 설정하면 카카오맵으로 표시됩니다.")
+
+        if routes:
+            badge = {"real": "✅ 실제 경로", "walk": "➖ 직선(도보)",
+                     "no_route": "⚠️ 경로 없음", "error": "❌ 조회 실패",
+                     "no_key": "➖ 키 없음"}
+            rows = []
+            for m in active:
+                for dst in m.enabled_destinations:
+                    info = routes.get((m.key, dst.key), {})
+                    rows.append({"구성원": m.name, "목적지": dst.label,
+                                 "이동수단": TRAVEL_MODES[dst.mode],
+                                 "경로": badge.get(info.get("status"), "-"),
+                                 "비고": info.get("reason", "")})
+            status = pd.DataFrame(rows)
+            with st.expander("경로 조회 상태 — 왜 어떤 선은 직선인가", expanded=True):
+                st.dataframe(status, use_container_width=True, hide_index=True)
+                if (status["경로"] == "❌ 조회 실패").any():
+                    st.warning("카카오 **대중교통 길찾기**는 디벨로퍼스 콘솔에서 "
+                               "[내 애플리케이션 > 제품 설정 > 카카오맵] 사용 설정이 필요합니다. "
+                               "자동차 길찾기(카카오모빌리티)와 권한이 다릅니다.")
 
         mrow = top.loc[map_sel]
         for m in active:
