@@ -178,19 +178,25 @@ if not os.path.exists(os.path.join(DATA, "listings.csv")):
 st.session_state.setdefault("stage", "setup")
 st.session_state.setdefault("listing_source", "bundled")
 st.session_state.setdefault("listing_source_error", "")
-st.session_state.setdefault("selected_gu", ["강남구", "송파구", "마포구"])
+# 위젯 key(selected_gu_widget)가 아니라 별도 키에 담아 둔다. 결과 화면으로 넘어가면
+# 설정 화면의 위젯이 렌더링되지 않아 위젯 상태가 정리되는데, 그때 선택이 비어버리면
+# 엉뚱하게 내장 목업 데이터로 폴백된다.
+st.session_state.setdefault("gu_choice", ["강남구", "송파구", "마포구"])
 
 listings = load_listings()
 public_listing_stats: dict | None = None
 if st.session_state.listing_source == "public":
-    try:
-        codes = tuple(c for c, name in SEOUL_GU_NAMES.items()
-                      if name in st.session_state.selected_gu)
-        listings, public_listing_stats = load_latest_public_listings(codes)
-        st.session_state.listing_source_error = ""
-    except Exception as e:
+    codes = tuple(c for c, name in SEOUL_GU_NAMES.items()
+                  if name in st.session_state.gu_choice)
+    if not codes:
         st.session_state.listing_source = "bundled"
-        st.session_state.listing_source_error = str(e)
+    else:
+        try:
+            listings, public_listing_stats = load_latest_public_listings(codes)
+            st.session_state.listing_source_error = ""
+        except Exception as e:
+            st.session_state.listing_source = "bundled"
+            st.session_state.listing_source_error = str(e)
 
 
 # =========================================================================== #
@@ -550,13 +556,18 @@ def render_setup() -> None:
                     pending_index = len(members) - 1
             st.markdown('<div class="privacy">🛡️ &nbsp; 입력한 위치 정보는 추천을 위해서만 안전하게 사용됩니다.</div>', unsafe_allow_html=True)
             def _on_gu_change() -> None:
-                """구를 고르면 곧바로 공공데이터로 전환한다(별도 버튼 없이)."""
-                st.session_state.listing_source = "public" if st.session_state.selected_gu else "bundled"
+                """구를 고르면 곧바로 공공데이터로 전환한다(별도 버튼 없이).
+
+                위젯 값을 gu_choice 로 옮겨 둬야 결과 화면으로 넘어가 위젯이 사라져도
+                선택이 유지된다.
+                """
+                st.session_state.gu_choice = list(st.session_state.selected_gu_widget)
+                st.session_state.listing_source = "public" if st.session_state.gu_choice else "bundled"
                 st.session_state.listing_source_error = ""
 
             gu_names = st.multiselect(
                 "후보를 찾을 자치구 (서울 25개구)", list(SEOUL_GU_NAMES.values()),
-                default=st.session_state.selected_gu, key="selected_gu",
+                default=st.session_state.gu_choice, key="selected_gu_widget",
                 on_change=_on_gu_change, disabled=not public_data_ready,
                 help="고른 구의 최신 실거래 매물을 전부 가져옵니다. 선택하면 바로 반영됩니다.")
             if not public_data_ready:
