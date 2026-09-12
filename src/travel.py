@@ -80,15 +80,30 @@ class EstimatedTravelProvider(TravelProvider):
 
 
 def _secret(name: str) -> str:
-    """환경변수 → .env → Streamlit Secrets 순으로 읽는다.
+    """환경변수 → .env → Streamlit Secrets 순으로 키를 찾는다.
 
-    지도 경로는 load_settings() 를 거쳐 st.secrets 까지 보는데 여기만
-    os.getenv 를 봐서, 배포본(Secrets 로만 키를 넣은 경우)에서 지도 선은 실제
-    경로인데 이동시간만 조용히 추정치로 떨어졌었다. 같은 경로로 통일한다.
+    여기만 os.getenv 를 보면, Secrets 로만 키를 넣은 배포본에서 지도 선은 실제
+    경로인데 이동시간만 조용히 추정치로 떨어진다. 설정 로더를 import 하지 않고
+    자립적으로 두는 이유는, 배포본의 config.py 가 뒤처져 있어도 깨지지 않게
+    하기 위함이다(실제로 ImportError 로 앱이 죽은 적이 있다).
     """
-    from .data_sources.config import _ensure_env_loaded, _read_secret
-    _ensure_env_loaded()
-    return _read_secret(name)
+    value = os.environ.get(name, "")
+    if value:
+        return value.strip()
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        value = os.environ.get(name, "")
+        if value:
+            return value.strip()
+    except Exception:
+        pass
+    try:
+        import streamlit as st
+        secret = st.secrets.get(name, "")
+        return str(secret).strip() if secret is not None else ""
+    except Exception:
+        return ""
 
 
 class ApiTravelProvider(TravelProvider):
