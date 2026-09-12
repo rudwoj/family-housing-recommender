@@ -159,20 +159,41 @@ class Member:
                    min_satisfaction=d.get("min_satisfaction", 0.0))
 
 
-DEFAULT_MEMBERS: list[Member] = [
-    Member("dad", "아빠", "#2563eb", [
-        Destination("work", "여의도 직장", 37.5216, 126.9243, "transit", 1.0),
-        Destination("gym", "운동 시설", 37.5300, 126.9300, "walk", 0.4, enabled=False),
-    ]),
-    Member("mom", "엄마", "#db2777", [
-        Destination("work", "강남 직장", 37.4979, 127.0276, "drive", 1.0),
-        Destination("mart", "대형마트", 37.5100, 127.0200, "drive", 0.5),
-    ]),
-    Member("child", "자녀", "#059669", [
-        Destination("school", "학교", 37.5050, 127.0450, "walk", 1.0),
-        Destination("academy", "대치 학원가", 37.4995, 127.0630, "transit", 0.8),
-    ]),
+MEMBER_COLORS = ["#2563eb", "#db2777", "#059669", "#d97706", "#7c3aed", "#0891b2"]
+DEFAULT_MEMBER_COUNT = 4
+MAX_MEMBERS = 6
+
+# 구성원 i 의 기본 목적지 템플릿 (이름·좌표·이동수단 모두 앱에서 수정 가능)
+DESTINATION_PRESETS = [
+    ("직장", 37.5216, 126.9243, "transit"),
+    ("직장", 37.4979, 127.0276, "drive"),
+    ("학교", 37.5050, 127.0450, "walk"),
+    ("학원", 37.4995, 127.0630, "transit"),
+    ("주 활동지", 37.5638, 126.9084, "transit"),
+    ("주 활동지", 37.5385, 127.0823, "drive"),
 ]
+SECONDARY_PRESET = ("보조 목적지", 37.5100, 127.0200, "drive")
+
+
+def make_default_members(n: int = DEFAULT_MEMBER_COUNT) -> list[Member]:
+    """
+    구성원 기본 구성. 이름은 '구성원 1..n' 이며 앱에서 사용자가 직접 바꾼다.
+    key(m1, m2, ...)는 컬럼 식별자라 이름을 바꿔도 고정된다.
+    """
+    members = []
+    for i in range(max(1, min(n, MAX_MEMBERS))):
+        label, lat, lon, mode = DESTINATION_PRESETS[i % len(DESTINATION_PRESETS)]
+        s_label, s_lat, s_lon, s_mode = SECONDARY_PRESET
+        members.append(Member(
+            key=f"m{i + 1}", name=f"구성원 {i + 1}", color=MEMBER_COLORS[i % len(MEMBER_COLORS)],
+            destinations=[
+                Destination("dest1", label, lat, lon, mode, 1.0, True),
+                Destination("dest2", s_label, s_lat, s_lon, s_mode, 0.5, False),
+            ]))
+    return members
+
+
+DEFAULT_MEMBERS: list[Member] = make_default_members()
 
 
 ORIENTATION_SCORE: dict[str, float] = {
