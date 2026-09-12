@@ -84,7 +84,7 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
             return {"path": [], "status": "walk",
                     "reason": "TMAP_APP_KEY 가 없어 직선으로 표시합니다"}
         try:
-            route = tmap.pedestrian_route(lat, lon, dest_lat, dest_lon, tmap_key)
+            route = tmap.pedestrian_route(lat, lon, dest_lat, dest_lon, tmap_key, timeout=15)
             if route is not None and len(route.path) >= 2:
                 return {"path": route.path, "status": "real", "reason": "TMap",
                         "minutes": route.total_time_sec / 60.0}
@@ -96,7 +96,7 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
     if mode == "transit" and odsay_key:
         # 대중교통은 ODsay 를 먼저 쓴다 (카카오 대중교통은 응답이 커서 느리다).
         try:
-            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key)
+            route = odsay.transit_route(lat, lon, dest_lat, dest_lon, odsay_key, timeout=15)
             if route is not None and len(route.path) >= 2:
                 return {"path": route.path, "status": "real", "reason": "ODsay",
                         "minutes": route.total_time_sec / 60.0}
@@ -108,9 +108,9 @@ def fetch_real_route(lat: float, lon: float, dest_lat: float, dest_lon: float,
         return {"path": [], "status": "no_key", "reason": "카카오 키 없음"}
     try:
         if mode == "drive":
-            route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key)
+            route = kakao.car_directions(lat, lon, dest_lat, dest_lon, api_key, timeout=15)
         else:
-            route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key)
+            route = kakao.transit_route(lat, lon, dest_lat, dest_lon, api_key, timeout=15)
         if route is not None and len(route.path) >= 2:
             secs = getattr(route, "duration_sec", None) or getattr(route, "total_time_sec", None)
             return {"path": route.path, "status": "real", "reason": "",
