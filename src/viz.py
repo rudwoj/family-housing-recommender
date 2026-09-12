@@ -26,9 +26,12 @@ except Exception:  # pragma: no cover
 
 # plotly 5.24+ 의 MapLibre 기반 트레이스. 구형 Scattermapbox 는 plotly 6.x 에서
 # Mapbox 토큰을 요구하므로(타일에 "API KEY REQUIRED" 표시) 가능하면 이쪽을 쓴다.
+# 베이스맵은 API 키가 필요 없는 Carto 계열을 쓴다.
+#   ("open-street-map" 은 plotly 6 에서 MapTiler 경유라 키를 요구한다)
 HAS_SCATTERMAP = hasattr(go, "Scattermap")
 MapTrace = go.Scattermap if HAS_SCATTERMAP else go.Scattermapbox
 MAP_LAYOUT_KEY = "map" if HAS_SCATTERMAP else "mapbox"
+BASEMAP_STYLE = "carto-positron"
 
 GRID = dict(showgrid=True, gridcolor="rgba(128,128,128,0.25)")
 LAYOUT = dict(margin=dict(l=10, r=10, t=44, b=10), template="plotly_white",
@@ -249,7 +252,7 @@ def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None 
             marker=dict(size=[0, 14], color=m_.color),
             name=f"{m_.name} → {m_.anchor_label}",
             hovertemplate=f"{m_.name} 동선<extra></extra>"))
-    fig.update_layout(**{MAP_LAYOUT_KEY: dict(style="open-street-map",
+    fig.update_layout(**{MAP_LAYOUT_KEY: dict(style=BASEMAP_STYLE,
                                               center=dict(lat=center[0], lon=center[1]), zoom=10)},
                       margin=dict(l=0, r=0, t=30, b=0), height=560,
                       legend=dict(orientation="h", y=-0.05),
