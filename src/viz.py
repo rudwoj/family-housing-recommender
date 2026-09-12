@@ -24,6 +24,12 @@ try:  # folium 은 선택 의존성
 except Exception:  # pragma: no cover
     HAS_FOLIUM = False
 
+# plotly 5.24+ 의 MapLibre 기반 트레이스. 구형 Scattermapbox 는 plotly 6.x 에서
+# Mapbox 토큰을 요구하므로(타일에 "API KEY REQUIRED" 표시) 가능하면 이쪽을 쓴다.
+HAS_SCATTERMAP = hasattr(go, "Scattermap")
+MapTrace = go.Scattermap if HAS_SCATTERMAP else go.Scattermapbox
+MAP_LAYOUT_KEY = "map" if HAS_SCATTERMAP else "mapbox"
+
 GRID = dict(showgrid=True, gridcolor="rgba(128,128,128,0.25)")
 LAYOUT = dict(margin=dict(l=10, r=10, t=44, b=10), template="plotly_white",
               font=dict(family="Apple SD Gothic Neo, Malgun Gothic, sans-serif", size=12))
@@ -220,11 +226,11 @@ def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None 
 
     fig = go.Figure()
     # 지도 배경 위에서도 마커가 보이도록 흰색 헤일로를 먼저 깐다
-    fig.add_trace(go.Scattermapbox(
+    fig.add_trace(MapTrace(
         lat=top["lat"], lon=top["lon"], mode="markers",
         marker=dict(size=[26 if i == sel else 20 for i in top.index], color="white"),
         hoverinfo="skip", showlegend=False))
-    fig.add_trace(go.Scattermapbox(
+    fig.add_trace(MapTrace(
         lat=top["lat"], lon=top["lon"], mode="markers+text",
         marker=dict(size=[22 if i == sel else 16 for i in top.index],
                     color=["#2563eb" if i == sel else "#475569" for i in top.index]),
@@ -237,13 +243,14 @@ def build_map(top: pd.DataFrame, members: list[Member], selected_id: str | None 
     for m_ in members:
         if m_.anchor_lat is None:
             continue
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(MapTrace(
             lat=[r["lat"], m_.anchor_lat], lon=[r["lon"], m_.anchor_lon],
             mode="lines+markers", line=dict(width=3, color=m_.color),
             marker=dict(size=[0, 14], color=m_.color),
             name=f"{m_.name} → {m_.anchor_label}",
             hovertemplate=f"{m_.name} 동선<extra></extra>"))
-    fig.update_layout(mapbox=dict(style="open-street-map", center=dict(lat=center[0], lon=center[1]), zoom=10),
+    fig.update_layout(**{MAP_LAYOUT_KEY: dict(style="open-street-map",
+                                              center=dict(lat=center[0], lon=center[1]), zoom=10)},
                       margin=dict(l=0, r=0, t=30, b=0), height=560,
                       legend=dict(orientation="h", y=-0.05),
                       title=f"선택 매물 기준 구성원 동선 — {r['name']}")
