@@ -123,7 +123,25 @@ def kakao_map_html(top, members: list[Member], selected_id: str,
       void ov;
     }});
 
-    if (!bounds.isEmpty()) map.setBounds(bounds);
+    // 컴포넌트 iframe 은 처음에 크기가 0 이라, 그 상태로 setBounds 를 부르면
+    // 카카오가 레벨을 최대로 빼버린다(한반도 전체가 보인다). 크기가 잡힌 뒤
+    // relayout + setBounds 를 다시 부른다.
+    var fitted = false;
+    function fit() {{
+      var el = document.getElementById('map');
+      if (!el.clientWidth || !el.clientHeight) return;
+      map.relayout();
+      if (!bounds.isEmpty()) map.setBounds(bounds);
+      fitted = true;
+    }}
+    fit();
+    if (!fitted) {{
+      var tries = 0;
+      var timer = setInterval(function () {{
+        fit();
+        if (fitted || ++tries > 40) clearInterval(timer);
+      }}, 150);
+    }}
 
     var seen = {{}}, html = '';
     D.lines.forEach(function (ln) {{
